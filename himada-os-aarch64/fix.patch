@@ -1,0 +1,18 @@
+--- src/main.rs
++++ src/main.rs
+@@ -14,6 +14,10 @@
+ use limine::request::FramebufferRequest;
++use limine::BaseRevision;
+ 
+ #[used]
+ #[link_section = ".requests"]
++static BASE_REVISION: BaseRevision = BaseRevision::new();
++
++#[used]
++#[link_section = ".requests"]
+ pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+@@ -32,2 +36,4 @@
+ pub extern "C" fn _start() -> ! {
++    assert!(BASE_REVISION.is_supported());
++
+     mm::init();

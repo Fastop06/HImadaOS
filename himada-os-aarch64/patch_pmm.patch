@@ -1,0 +1,58 @@
+--- src/mm/pmm.rs
++++ src/mm/pmm.rs
+@@ -62,4 +62,31 @@
+         None
+     }
++
++    pub fn alloc_frames(&mut self, pages: usize) -> Option<usize> {
++        if self.free_frames < pages {
++            return None;
++        }
++        let mut count = 0;
++        let mut start_idx = 0;
++        
++        for i in 0..self.bitmap_size {
++            let bit = 1 << (i % 8);
++            let byte = i / 8;
++            if (self.bitmap[byte] & bit) == 0 {
++                if count == 0 { start_idx = i; }
++                count += 1;
++                if count == pages {
++                    for j in start_idx..(start_idx + pages) {
++                        self.bitmap[j / 8] |= 1 << (j % 8);
++                    }
++                    self.free_frames -= pages;
++                    return Some(start_idx * 4096);
++                }
++            } else {
++                count = 0;
++            }
++        }
++        None
++    }
+ 
+     pub fn free_frame(&mut self, phys_addr: usize) {
+@@ -74,4 +101,11 @@
+         }
+     }
++
++    pub fn free_frames(&mut self, phys_addr: usize, pages: usize) {
++        let start_idx = phys_addr / 4096;
++        for j in start_idx..(start_idx + pages) {
++            self.bitmap[j / 8] &= !(1 << (j % 8));
++        }
++        self.free_frames += pages;
++    }
+ }
+ 
+@@ -83,6 +117,14 @@
+     PMM.lock().free_frame(phys_addr);
+ }
++
++pub fn alloc_frames(pages: usize) -> Option<usize> {
++    PMM.lock().alloc_frames(pages)
++}
++
++pub fn free_frames(phys_addr: usize, pages: usize) {
++    PMM.lock().free_frames(phys_addr, pages);
++}

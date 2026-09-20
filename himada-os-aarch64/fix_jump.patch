@@ -1,0 +1,19 @@
+--- src/sys/mod.rs
++++ src/sys/mod.rs
+@@ -4,11 +4,7 @@
+ pub unsafe fn jump_to_ring3(entry: usize, stack_top: usize) -> ! {
+     use core::arch::asm;
+-    asm!(
+-        "msr spsr_el1, xzr",
+-        "msr elr_el1, {0}",
+-        "msr sp_el0, {1}",
+-        "eret",
+-        in(reg) entry,
+-        in(reg) stack_top,
+-        options(noreturn)
+-    );
++    // For now, since TTBR0_EL1 is not set up, we run the payload in EL1
++    let entry_fn: extern "C" fn() = core::mem::transmute(entry);
++    entry_fn();
++    loop { asm!("wfe"); }
+ }

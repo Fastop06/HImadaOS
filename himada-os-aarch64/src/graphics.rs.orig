@@ -1,0 +1,108 @@
+use crate::FbInfo;
+use core::cmp::Ord;
+
+#[derive(Copy, Clone)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+pub fn draw_background(fb: &FbInfo, buffer: *mut u8, color_top: Color, color_bottom: Color) {
+    let width = fb.width as usize;
+    let height = fb.height as usize;
+    let pitch = fb.pitch as usize;
+    let bpp = (fb.bpp / 8) as usize;
+
+    for y in 0..height {
+        let blend = (y * 255) / height;
+        let inv = 255 - blend;
+        let r = ((color_top.r as usize * inv + color_bottom.r as usize * blend) / 255) as u8;
+        let g = ((color_top.g as usize * inv + color_bottom.g as usize * blend) / 255) as u8;
+        let b = ((color_top.b as usize * inv + color_bottom.b as usize * blend) / 255) as u8;
+        
+        let pixel_val = (r as u32) << 16 | (g as u32) << 8 | (b as u32);
+
+        for x in 0..width {
+            let offset = y * pitch + x * bpp;
+            unsafe {
+                core::ptr::write_volatile(buffer.add(offset) as *mut u32, pixel_val);
+            }
+        }
+    }
+}
+
+fn isqrt(n: usize) -> usize {
+    let mut x = n;
+    let mut y = 1;
+    while x > y {
+        x = (x + y) / 2;
+        y = n / x;
+    }
+    x
+}
+
+pub fn draw_rounded_rect_glass(
+    fb: &FbInfo, buffer: *mut u8, 
+    rect_x: usize, rect_y: usize, 
+    rect_w: usize, rect_h: usize, 
+    radius: usize, 
+    glass_color: Color
+) {
+    let pitch = fb.pitch as usize;
+    let bpp = (fb.bpp / 8) as usize;
+
+    for y in rect_y..(rect_y + rect_h) {
+        for x in rect_x..(rect_x + rect_w) {
+            let dx = if x < rect_x + radius { rect_x + radius - x } 
+                     else if x > rect_x + rect_w - radius { x - (rect_x + rect_w - radius) } 
+                     else { 0 };
+                     
+            let dy = if y < rect_y + radius { rect_y + radius - y } 
+                     else if y > rect_y + rect_h - radius { y - (rect_y + rect_h - radius) } 
+                     else { 0 };
+
+            let dist = isqrt(dx * dx + dy * dy);
+
+            let mut alpha = glass_color.a as usize;
+            if dist > radius {
+                continue;
+            } else if dist == radius {
+                alpha = alpha / 2;
+            }
+
+            let offset = y * pitch + x * bpp;
+            unsafe {
+                let current_pixel = core::ptr::read_volatile(buffer.add(offset) as *mut u32);
+                let bg_b = (current_pixel & 0xFF) as usize;
+                let bg_g = ((current_pixel >> 8) & 0xFF) as usize;
+                let bg_r = ((current_pixel >> 16) & 0xFF) as usize;
+
+                let inv_alpha = 255 - alpha;
+                let final_b = ((glass_color.b as usize * alpha) + (bg_b.saturating_add(30) * inv_alpha)) / 255;
+                let final_g = ((glass_color.g as usize * alpha) + (bg_g.saturating_add(30) * inv_alpha)) / 255;
+                let final_r = ((glass_color.r as usize * alpha) + (bg_r.saturating_add(30) * inv_alpha)) / 255;
+
+                let out_pixel = (final_r.min(255) as u32) << 16 | (final_g.min(255) as u32) << 8 | (final_b.min(255) as u32);
+                core::ptr::write_volatile(buffer.add(offset) as *mut u32, out_pixel);
+            }
+        }
+    }
+}
+
+#[inline(always)]
+pub unsafe fn clean_dcache_range(start: usize, len: usize) {
+    let line_size = 64; // Apple Silicon cache line size is 64 or 128 bytes. We'll use 64 for safety.
+    let end = start + len;
+    let mut addr = start & !(line_size - 1);
+    while addr < end {
+        core::arch::asm!(
+            "dc cvac, {0}",
+            in(reg) addr,
+            options(nostack, preserves_flags)
+        );
+        addr += line_size;
+    }
+    core::arch::asm!("dsb sy");
+}

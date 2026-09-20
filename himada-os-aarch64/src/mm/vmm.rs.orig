@@ -1,0 +1,21 @@
+use limine::request::HhdmRequest;
+
+#[used]
+#[link_section = ".requests"]
+pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+pub unsafe fn init() {
+    let _hhdm_offset = HHDM_REQUEST.response()
+        .expect("Limine didn't provide HHDM response")
+        .offset;
+}
+
+pub unsafe fn phys_to_virt(paddr: usize) -> usize {
+    let hhdm_offset = HHDM_REQUEST.response().unwrap().offset;
+    paddr + hhdm_offset as usize
+}
+
+pub unsafe fn map_user_page(_vaddr: usize, _paddr: usize) {
+    // ARM64 page table manipulation (TTBR0_EL1) goes here.
+    // For now, it's a stub until we pull in an AArch64 paging crate.
+}

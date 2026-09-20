@@ -1,0 +1,16 @@
+--- src/sys/gpu.rs
++++ src/sys/gpu.rs
+@@ -1,4 +1,6 @@
++extern crate alloc;
++
+ use virtio_drivers::{Hal, BufferDirection, PhysAddr};
+ use core::ptr::NonNull;
+ use crate::mm::{pmm, vmm};
+@@ -14,7 +16,7 @@
+ 
+     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
+         let paddr = pmm::alloc_frames(pages).expect("DMA alloc failed");
+-        let vaddr = vmm::phys_to_virt(paddr);
++        let vaddr = unsafe { vmm::phys_to_virt(paddr) };
+         (paddr as u64, NonNull::new(vaddr as *mut u8).unwrap())
+     }

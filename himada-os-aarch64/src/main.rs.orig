@@ -1,0 +1,89 @@
+
+#![no_std]
+#![no_main]
+#![feature(naked_functions)]
+
+pub mod hal;
+pub mod mm;
+pub mod sys;
+pub mod sysmem;
+pub mod fs;
+
+use limine::request::FramebufferRequest;
+
+#[used]
+#[link_section = ".requests"]
+static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+
+#[derive(Copy, Clone)]
+pub struct FbInfo {
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+    pub bpp: u64,
+    pub addr: u64,
+}
+
+pub static mut FB_INFO: FbInfo = FbInfo { width: 0, height: 0, pitch: 0, bpp: 0, addr: 0 };
+
+pub mod align;
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    crate::serial_println!("PANIC: {}", info);
+    loop {
+        unsafe { core::arch::asm!("wfe"); }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    hal::init();
+    mm::init();
+    sys::init();
+
+    serial_println!("HimadaOS AArch64 Initialized!");
+    
+    // Save FB info for userspace
+    if let Some(response) = FRAMEBUFFER_REQUEST.response() {
+        if let Some(fb) = response.framebuffers().first() {
+            unsafe {
+                FB_INFO.width = fb.width;
+                FB_INFO.height = fb.height;
+                FB_INFO.pitch = fb.pitch;
+                FB_INFO.bpp = fb.bpp as u64;
+                FB_INFO.addr = fb.address() as u64; // Physical addr logic depends on Limine mappings, but usually Limine maps FB at HHDM or we can just pass the virtual address since our kernel doesn't enforce strict page isolation for this PoC yet.
+            }
+        }
+    }
+    
+    static PAYLOAD: crate::align::AlignedElf<{ include_bytes!("../payload.elf").len() }> = crate::align::AlignedElf(*include_bytes!("../payload.elf"));
+    let payload = &PAYLOAD.0;
+    crate::serial_println!("Payload addr: {:#X}", payload.as_ptr() as usize);
+    unsafe {
+        let fb_buffer = FB_INFO.addr as *mut u8;
+        crate::graphics::draw_background(
+            &FB_INFO, fb_buffer, 
+            crate::graphics::Color { r: 15, g: 20, b: 35, a: 255 }, 
+            crate::graphics::Color { r: 35, g: 15, b: 45, a: 255 }
+        );
+        let win_w = FB_INFO.width as usize / 2;
+        let win_h = FB_INFO.height as usize / 2;
+        let win_x = (FB_INFO.width as usize - win_w) / 2;
+        let win_y = (FB_INFO.height as usize - win_h) / 2;
+        crate::graphics::draw_rounded_rect_glass(
+            &FB_INFO, fb_buffer,
+            win_x, win_y, win_w, win_h, 30,
+            crate::graphics::Color { r: 255, g: 255, b: 255, a: 80 }
+        );
+    }
+
+    if false  {
+        serial_println!("Loading GUI payload...");
+        unsafe { let phys = mm::pmm::alloc_frame().unwrap(); let virt = mm::vmm::phys_to_virt(phys) as *mut u8; core::ptr::copy_nonoverlapping(payload.as_ptr(), virt, payload.len()); let aligned_slice = core::slice::from_raw_parts(virt, payload.len()); sys::elf::load_and_run(aligned_slice); }
+    }
+    
+    loop {
+        unsafe { core::arch::asm!("wfe"); }
+    }
+}

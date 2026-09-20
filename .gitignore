@@ -1,0 +1,18 @@
+# Build artifacts
+target/
+*.iso
+disk.img
+*.img
+*.bin
+packages.idx
+extra.db
+core.db
+*.log
+__pycache__/
+*.pyc
+initrd.cpio
+initramfs/
+iso_root_arm64/
+iso_root_x86/
+calc_dynamic*
+musl_test*

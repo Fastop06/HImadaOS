@@ -1,0 +1,26 @@
+--- src/sys/gpu.rs
++++ src/sys/gpu.rs
+@@ -1,4 +1,4 @@
+-use virtio_drivers::{Hal, BufferDirection, PhysAddr, PAGE_SIZE};
++use virtio_drivers::{Hal, BufferDirection, PhysAddr};
+ use core::ptr::NonNull;
+ use crate::mm::{pmm, vmm};
+ use spin::Mutex;
+@@ -14,7 +14,7 @@
+     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
+         let paddr = pmm::alloc_frames(pages).expect("DMA alloc failed");
+         let vaddr = vmm::phys_to_virt(paddr);
+-        (paddr as usize, NonNull::new(vaddr as *mut u8).unwrap())
++        (paddr as u64, NonNull::new(vaddr as *mut u8).unwrap())
+     }
+ 
+     unsafe fn dma_dealloc(paddr: PhysAddr, _vaddr: NonNull<u8>, pages: usize) -> i32 {
+@@ -32,7 +32,7 @@
+ 
+     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection) -> PhysAddr {
+         let vaddr = buffer.cast::<u8>().as_ptr() as usize;
+-        vmm::virt_to_phys(vaddr as u64)
++        vmm::virt_to_phys(vaddr) as u64
+     }
+ 
+     unsafe fn unshare(_paddr: PhysAddr, _buffer: NonNull<[u8]>, _direction: BufferDirection) {}

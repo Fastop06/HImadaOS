@@ -1,0 +1,10 @@
+--- src/sys/mod.rs
++++ src/sys/mod.rs
+@@ -2,6 +2,7 @@
+ pub mod linux_abi;
+ pub mod elf;
++pub mod gpu;
+ 
+ pub fn init() {
+     syscall::init();
+ }

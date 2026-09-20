@@ -1,0 +1,13 @@
+--- src/graphics.rs
++++ src/graphics.rs
+@@ -21,4 +21,5 @@
+         }
+     }
++    unsafe { clean_dcache_range(buffer as usize, height * pitch); }
+ }
+ 
+@@ -62,4 +63,5 @@
+         }
+     }
++    unsafe { clean_dcache_range(buffer as usize, fb.height as usize * pitch); }
+ }

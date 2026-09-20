@@ -1,0 +1,13 @@
+--- src/mm/vmm.rs
++++ src/mm/vmm.rs
+@@ -14,6 +14,11 @@
+     paddr + hhdm_offset as usize
+ }
+ 
++pub unsafe fn virt_to_phys(vaddr: usize) -> usize {
++    let hhdm_offset = HHDM_REQUEST.response().unwrap().offset as usize;
++    vaddr - hhdm_offset
++}
++
+ pub unsafe fn map_user_page(_vaddr: usize, _paddr: usize) {
+     // ARM64 page table manipulation (TTBR0_EL1) goes here.
