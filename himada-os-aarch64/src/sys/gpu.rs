@@ -29,8 +29,11 @@ impl Ecam {
             + ((df.function as usize) << 12) 
             + (offset as usize & !3);
         
-        let vaddr = unsafe { crate::mm::vmm::phys_to_virt(addr) as *mut u32 };
-        vaddr
+        let page = addr & !0xFFF;
+        unsafe {
+            crate::mm::vmm::map_device_page(page, page);
+        }
+        addr as *mut u32
     }
 }
 
