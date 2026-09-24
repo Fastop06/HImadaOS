@@ -22,13 +22,16 @@ impl Ecam {
         Self { base }
     }
     
-    fn addr(&self, df: DeviceFunction, offset: u8) -> *mut u32 {
-        let addr = self.base 
+    pub fn addr_paddr(&self, df: DeviceFunction, offset: u8) -> usize {
+        self.base 
             + ((df.bus as usize) << 20) 
             + ((df.device as usize) << 15) 
             + ((df.function as usize) << 12) 
-            + (offset as usize & !3);
-        
+            + (offset as usize & !3)
+    }
+
+    fn addr(&self, df: DeviceFunction, offset: u8) -> *mut u32 {
+        let addr = self.addr_paddr(df, offset);
         let page = addr & !0xFFF;
         unsafe {
             crate::mm::vmm::map_device_page(page, page);
@@ -39,14 +42,20 @@ impl Ecam {
 
 impl ConfigurationAccess for Ecam {
     fn read_word(&self, device_function: DeviceFunction, register_offset: u8) -> u32 {
+        let paddr = self.addr_paddr(device_function, register_offset);
+        let page = paddr & !0xFFF;
         unsafe {
-            core::ptr::read_volatile(self.addr(device_function, register_offset))
+            crate::mm::vmm::map_device_page(page, page);
+            crate::hal::exceptions::safe_read_u32(paddr).unwrap_or(0xFFFF_FFFF)
         }
     }
 
     fn write_word(&mut self, device_function: DeviceFunction, register_offset: u8, data: u32) {
+        let paddr = self.addr_paddr(device_function, register_offset);
+        let page = paddr & !0xFFF;
         unsafe {
-            core::ptr::write_volatile(self.addr(device_function, register_offset), data)
+            crate::mm::vmm::map_device_page(page, page);
+            crate::hal::exceptions::safe_write_u32(paddr, data);
         }
     }
 

@@ -271,6 +271,10 @@ pub unsafe fn map_device_page_in_root(root_paddr: usize, vaddr: usize, paddr: us
     let l3_table_virt = phys_to_virt(table_phys) as *mut u64;
     // Valid (0b11) | AF (bit 10) | AP=01 (RW EL0/EL1) | SH=10 (Outer Shareable) | AttrIndx=0 (Device memory) | UXN | PXN
     let page_entry = (paddr as u64) | 0b11 | (1 << 10) | (0b01 << 6) | (0b10 << 8) | (0 << 2) | (1u64 << 54) | (1u64 << 53);
+    let cur_entry = core::ptr::read(l3_table_virt.add(l3_index));
+    if cur_entry == page_entry {
+        return;
+    }
     core::ptr::write(l3_table_virt.add(l3_index), page_entry);
     crate::graphics::clean_dcache_range(l3_table_virt.add(l3_index) as usize, 8);
     

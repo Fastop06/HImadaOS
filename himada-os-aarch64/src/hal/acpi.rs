@@ -24,6 +24,7 @@ pub struct AcpiInfo {
     pub ecam_base: Option<usize>,
     pub spcr_base: Option<usize>,
     pub spcr_interface: Option<u8>,
+    pub virtio_mmio_addrs: alloc::vec::Vec<usize>,
     pub has_ps2: bool,
 }
 
@@ -31,6 +32,7 @@ pub static mut ACPI_INFO: AcpiInfo = AcpiInfo {
     ecam_base: None,
     spcr_base: None,
     spcr_interface: None,
+    virtio_mmio_addrs: alloc::vec::Vec::new(),
     has_ps2: false,
 };
 
@@ -43,6 +45,50 @@ unsafe fn ensure_virt(addr: usize) -> *const u8 {
         crate::mm::vmm::map_device_page(page, page);
         crate::mm::vmm::map_device_page(page + 4096, page + 4096);
         addr as *const u8
+    }
+}
+
+unsafe fn parse_dsdt(dsdt_paddr: usize) {
+    let d_vaddr = ensure_virt(dsdt_paddr);
+    let d_hdr = &*(d_vaddr as *const AcpiHeader);
+    let d_length = core::ptr::read_unaligned(core::ptr::addr_of!(d_hdr.length)) as usize;
+    let d_sig = core::str::from_utf8(&d_hdr.signature).unwrap_or("????");
+    if d_sig != "DSDT" || d_length > 1024 * 1024 {
+        return;
+    }
+    serial_println!("[ACPI] DSDT valid, length = {}", d_length);
+
+    // Map all pages covering the DSDT table
+    for p in (0..d_length).step_by(4096) {
+        let page = (dsdt_paddr + p) & !0xFFF;
+        crate::mm::vmm::map_device_page(page, page);
+    }
+
+    let aml = core::slice::from_raw_parts(d_vaddr.add(36), d_length.saturating_sub(36));
+    // Search for Linaro VirtIO MMIO hardware ID: "LNRO0005"
+    let target = b"LNRO0005";
+    let mut pos = 0;
+    while pos + target.len() <= aml.len() {
+        if &aml[pos..pos + target.len()] == target {
+            serial_println!("[ACPI] Found LNRO0005 in DSDT at offset {}", pos);
+            let window_len = (aml.len() - pos).min(256);
+            let window = &aml[pos..pos + window_len];
+            for w in 0..window.len().saturating_sub(12) {
+                if window[w] == 0x86 { // Memory32Fixed descriptor
+                    let base = u32::from_le_bytes(window[w + 4..w + 8].try_into().unwrap()) as usize;
+                    let len = u32::from_le_bytes(window[w + 8..w + 12].try_into().unwrap()) as usize;
+                    if base != 0 && (len == 0x200 || len == 0x1000 || len == 0x4000) {
+                        serial_println!("[ACPI] DSDT: VirtIO MMIO at {:#X} (len: {:#X})", base, len);
+                        if !ACPI_INFO.virtio_mmio_addrs.contains(&base) {
+                            ACPI_INFO.virtio_mmio_addrs.push(base);
+                        }
+                    }
+                }
+            }
+            pos += target.len();
+        } else {
+            pos += 1;
+        }
     }
 }
 
@@ -141,6 +187,20 @@ pub fn init() {
                     let has_8042 = (flags & (1 << 1)) != 0;
                     serial_println!("[ACPI] FADT: IAPC Boot Arch = {:#X}, 8042 PS/2 = {}", flags, has_8042);
                     ACPI_INFO.has_ps2 = has_8042;
+                }
+                let dsdt_paddr: usize = if t_length >= 148 {
+                    let x_dsdt = core::ptr::read_unaligned(t_vaddr.add(140) as *const u64) as usize;
+                    if x_dsdt != 0 { x_dsdt } else {
+                        core::ptr::read_unaligned(t_vaddr.add(40) as *const u32) as usize
+                    }
+                } else if t_length >= 44 {
+                    core::ptr::read_unaligned(t_vaddr.add(40) as *const u32) as usize
+                } else {
+                    0
+                };
+                if dsdt_paddr != 0 {
+                    serial_println!("[ACPI] FADT: DSDT physical address: {:#X}", dsdt_paddr);
+                    parse_dsdt(dsdt_paddr);
                 }
             }
         }

@@ -205,7 +205,7 @@ pub fn probe_pci_bus(ecam_base: usize) -> bool {
 pub fn init(fdt_vaddr: usize) {
     crate::serial_println!("[Device Manager] Initializing Subsystem...");
     
-    // 1. Probe PCI buses (VirtIO Net PCI & VirtIO Blk PCI)
+    // 1. Probe PCI buses if declared in ACPI (MCFG) or FDT
     let mut ecam_candidates: Vec<usize> = Vec::new();
     if let Some(ecam) = unsafe { crate::hal::acpi::ACPI_INFO.ecam_base } {
         ecam_candidates.push(ecam);
@@ -229,25 +229,33 @@ pub fn init(fdt_vaddr: usize) {
             }
         }
     }
-    for &fallback in &[0x40_1000_0000usize, 0x3f00_0000usize, 0x1000_0000usize] {
-        if !ecam_candidates.contains(&fallback) {
-            ecam_candidates.push(fallback);
+
+    // Only if DTB/FDT is present and neither ACPI nor FDT reported ECAM, allow fallback ECAMs
+    if fdt_vaddr != 0 && ecam_candidates.is_empty() {
+        for &fallback in &[0x40_1000_0000usize, 0x3f00_0000usize, 0x1000_0000usize] {
+            if !ecam_candidates.contains(&fallback) {
+                ecam_candidates.push(fallback);
+            }
         }
     }
 
-    for ecam in ecam_candidates {
+    for &ecam in &ecam_candidates {
         if probe_pci_bus(ecam) {
             crate::serial_println!("[Device Manager] VirtIO PCI devices enumerated from ECAM {:#X}", ecam);
             break;
         }
     }
 
-    // 2. Probe MMIO devices if needed
-    let mut scanned_fdt = false;
+    // 2. Probe MMIO devices from ACPI DSDT (LNRO0005) and/or FDT
+    let acpi_mmio = unsafe { crate::hal::acpi::ACPI_INFO.virtio_mmio_addrs.clone() };
+    for addr in acpi_mmio {
+        crate::serial_println!("[Device Manager] Probing ACPI DSDT VirtIO MMIO at {:#X}...", addr);
+        probe_mmio_slot(addr);
+    }
+
     if fdt_vaddr != 0 {
         let vaddr = fdt_vaddr as *const u8;
         if let Ok(fdt) = unsafe { Fdt::from_ptr(vaddr) } {
-            scanned_fdt = true;
             for node in fdt.all_nodes() {
                 if let Some(compatible) = node.property("compatible") {
                     if compatible.as_str() == Some("virtio,mmio") {
@@ -261,16 +269,25 @@ pub fn init(fdt_vaddr: usize) {
                 }
             }
         }
-    }
-
-    if !scanned_fdt || DEVICE_MANAGER.lock().net_devices.is_empty() {
-        crate::serial_println!("[Device Manager] Probing QEMU VirtIO MMIO slots (0x0a000000..0x0a004000)...");
-        for slot in 0..32 {
-            let addr = 0x0a00_0000 + slot * 0x200;
-            probe_mmio_slot(addr);
+        // In QEMU (with DTB), also probe QEMU VirtIO MMIO slots if still needed
+        if DEVICE_MANAGER.lock().net_devices.is_empty() {
+            for slot in 0..32 {
+                let addr = 0x0a00_0000 + slot * 0x200;
+                probe_mmio_slot(addr);
+            }
         }
     }
 
+    let has_net = !DEVICE_MANAGER.lock().net_devices.is_empty();
+    let has_blk = !DEVICE_MANAGER.lock().block_devices.is_empty();
+    if has_net {
+        crate::log_step("VirtIO Network Adapter (eth0) online.", Some("OK"));
+    } else {
+        crate::log_step("Running in Loopback-only network mode.", None);
+    }
+    if has_blk {
+        crate::log_step("VirtIO Block Storage online.", Some("OK"));
+    }
     crate::serial_println!("[Device Manager] Scan complete.");
 }
 
@@ -278,12 +295,14 @@ fn probe_mmio_slot(addr: usize) {
     unsafe {
         crate::mm::vmm::map_device_page(addr & !0xFFF, addr & !0xFFF);
     }
-    let vaddr = addr;
-    let magic = unsafe { core::ptr::read_volatile(vaddr as *const u32) };
+    let magic = match unsafe { crate::hal::exceptions::safe_read_u32(addr) } {
+        Some(m) => m,
+        None => return,
+    };
     if magic != 0x74726976 { // 'virt'
         return;
     }
-    let header = match NonNull::new(vaddr as *mut VirtIOHeader) {
+    let header = match NonNull::new(addr as *mut VirtIOHeader) {
         Some(h) => h,
         None => return,
     };

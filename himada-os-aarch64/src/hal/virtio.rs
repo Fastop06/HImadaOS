@@ -21,7 +21,8 @@ unsafe impl Hal for VirtioHal {
     }
 
     unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
-        let pages = (size + 4095) / 4096;
+        let offset = paddr as usize & 0xFFF;
+        let pages = (offset + size + 4095) / 4096;
         for i in 0..pages {
             let page_paddr = (paddr as usize & !0xFFF) + i * 4096;
             vmm::map_device_page(page_paddr, page_paddr);

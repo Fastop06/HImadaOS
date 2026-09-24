@@ -121,7 +121,13 @@ pub fn init() {
         }
 
         let base = mmio_paddr as *mut u8;
-        let dword0 = ptr::read_volatile(base as *const u32);
+        let dword0 = match crate::hal::exceptions::safe_read_u32(mmio_paddr) {
+            Some(d) => d,
+            None => {
+                serial_println!("[xHCI] Fault reading xHCI base {:#X}", mmio_paddr);
+                return;
+            }
+        };
         let caplength = (dword0 & 0xFF) as usize;
         let hciversion = ((dword0 >> 16) & 0xFFFF) as u16;
         let hcsparams1 = ptr::read_volatile(base.add(4) as *const u32);
@@ -711,7 +717,10 @@ fn find_xhci_base() -> usize {
                     let dev_addr = ecam + ((bus << 20) | (dev << 15) | (func << 12));
                     unsafe {
                         map_device_page(dev_addr, dev_addr);
-                        let id_reg = ptr::read_volatile(dev_addr as *const u32);
+                        let id_reg = match crate::hal::exceptions::safe_read_u32(dev_addr) {
+                            Some(v) => v,
+                            None => 0xFFFF_FFFF,
+                        };
                         if id_reg == 0xFFFF_FFFF || id_reg == 0 {
                             if func == 0 { break; }
                             continue;

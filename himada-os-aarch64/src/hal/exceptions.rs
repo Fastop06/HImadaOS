@@ -123,11 +123,61 @@ vec_handler_\id:
     DEF_HANDLER 13
     DEF_HANDLER 14
     DEF_HANDLER 15
+
+.global safe_read_u32_asm
+safe_read_u32_asm:
+.global safe_read_instruction
+safe_read_instruction:
+    ldr w2, [x0]
+    str w2, [x1]
+    mov x0, #0
+    ret
+
+.global safe_read_fault_handler
+safe_read_fault_handler:
+    mov w2, #0xFFFFFFFF
+    str w2, [x1]
+    mov x0, #1
+    ret
+
+.global safe_write_u32_asm
+safe_write_u32_asm:
+.global safe_write_instruction
+safe_write_instruction:
+    str w1, [x0]
+    mov x0, #0
+    ret
+
+.global safe_write_fault_handler
+safe_write_fault_handler:
+    mov x0, #1
+    ret
 "#
 );
 
 extern "C" {
     pub static exception_vector_table: u8;
+    pub fn safe_read_instruction();
+    pub fn safe_read_fault_handler();
+    pub fn safe_write_instruction();
+    pub fn safe_write_fault_handler();
+    fn safe_read_u32_asm(addr: *const u32, out: *mut u32) -> u64;
+    fn safe_write_u32_asm(addr: *mut u32, val: u32) -> u64;
+}
+
+pub unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
+    let mut out: u32 = 0;
+    let res = safe_read_u32_asm(addr as *const u32, &mut out);
+    if res == 0 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+pub unsafe fn safe_write_u32(addr: usize, val: u32) -> bool {
+    let res = safe_write_u32_asm(addr as *mut u32, val);
+    res == 0
 }
 
 pub fn init() {
@@ -163,6 +213,19 @@ fn write_str(s: &str, out: &mut [u8], mut offset: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn exception_handler_c(ctx: *mut ExceptionContext, vector_id: u64) {
     let context = unsafe { &mut *ctx };
+
+    // Safe memory probing exception fixup:
+    // If the fault happened during a safe read or safe write instruction, redirect ELR to the fault recovery handler!
+    let elr = context.elr;
+    if elr == safe_read_instruction as *const () as usize as u64 {
+        context.elr = safe_read_fault_handler as *const () as usize as u64;
+        return;
+    }
+    if elr == safe_write_instruction as *const () as usize as u64 {
+        context.elr = safe_write_fault_handler as *const () as usize as u64;
+        return;
+    }
+
     let esr: u64;
     let far: u64;
     unsafe {
@@ -201,6 +264,24 @@ pub extern "C" fn exception_handler_c(ctx: *mut ExceptionContext, vector_id: u64
         };
 
         crate::serial_println!("CPU EXCEPTION: [{}] ESR={:#018x} FAR={:#018x} ELR={:#018x}", vname, esr, far, context.elr);
+
+        crate::log_step("KERNEL CPU EXCEPTION!", Some("FAIL"));
+        let mut line = [0u8; 80];
+        let mut idx = write_str("Vec: ", &mut line, 0);
+        idx = write_str(vname, &mut line, idx);
+        idx = write_str(" ESR: ", &mut line, idx);
+        idx = write_hex64(esr, &mut line, idx);
+        if let Ok(s) = core::str::from_utf8(&line[..idx]) {
+            crate::log_step(s, None);
+        }
+        let mut line2 = [0u8; 80];
+        let mut idx2 = write_str("FAR: ", &mut line2, 0);
+        idx2 = write_hex64(far, &mut line2, idx2);
+        idx2 = write_str(" ELR: ", &mut line2, idx2);
+        idx2 = write_hex64(context.elr, &mut line2, idx2);
+        if let Ok(s2) = core::str::from_utf8(&line2[..idx2]) {
+            crate::log_step(s2, None);
+        }
 
         let cpu = crate::hal::smp::current_cpu_id();
         let ksp = ctx as usize + 272;
