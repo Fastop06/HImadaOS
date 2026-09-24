@@ -3749,7 +3749,7 @@ pub fn resolve_host(hostname: &str) -> [u8; 4] {
     let fallback_ip = match h {
         "mirror.archlinuxarm.org" => [50, 116, 36, 110],
         "nj.us.mirror.archlinuxarm.org" => [45, 63, 23, 117],
-        "fl.us.mirror.archlinuxarm.org" => [108, 61, 194, 234],
+        "fl.us.mirror.archlinuxarm.org" => [15, 204, 199, 123],
         "google.com" | "www.google.com" => [142, 250, 180, 206],
         "kernel.org" | "www.kernel.org" => [139, 178, 84, 217],
         "himada.org" | "repo.himada.org" => [95, 217, 163, 246],

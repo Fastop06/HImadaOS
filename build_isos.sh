@@ -51,9 +51,9 @@ done
 # Arch Linux ARM official mirrorlist
 cat << 'MIRRORS' > initramfs/etc/pacman.d/mirrorlist
 ## Arch Linux ARM official mirrorlist for HimadaOS
-Server = http://mirror.archlinuxarm.org/$arch/$repo
-Server = http://nj.us.mirror.archlinuxarm.org/$arch/$repo
 Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo
+Server = http://nj.us.mirror.archlinuxarm.org/$arch/$repo
+Server = http://mirror.archlinuxarm.org/$arch/$repo
 Server = http://10.0.2.2:8080/packages
 MIRRORS
 
