@@ -1,7 +1,7 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::RwLock;
+use spin::{RwLock, Mutex};
 
 pub trait FileOps: Send + Sync {
     fn read(&self, offset: usize, buf: &mut [u8]) -> usize;
@@ -66,6 +66,25 @@ pub enum SocketTarget {
     },
 }
 
+#[derive(Clone, Debug)]
+pub struct EventFdState {
+    pub counter: u64,
+    pub flags: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EpollRegistration {
+    pub fd: i32,
+    pub events: u32,
+    pub data: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct EpollState {
+    pub registrations: Vec<EpollRegistration>,
+    pub flags: u32,
+}
+
 pub enum NodeKind {
     Socket(SocketTarget),
     UdpSocket(smoltcp::iface::SocketHandle, Arc<spin::Mutex<Option<(smoltcp::wire::IpAddress, u16)>>>),
@@ -74,6 +93,9 @@ pub enum NodeKind {
     CharDevice,
     BlockDevice(Arc<spin::Mutex<dyn crate::hal::device::BlockDevice>>),
     Pipe(Arc<spin::Mutex<PipeRingBuffer>>),
+    SymLink(String),
+    EventFd(Arc<Mutex<EventFdState>>),
+    Epoll(Arc<Mutex<EpollState>>),
 }
 
 pub struct Ext4FileOps {
@@ -267,6 +289,14 @@ pub fn add_node(path: &str, node: Arc<VfsNode>) {
 }
 
 pub fn lookup(path: &str) -> Option<Arc<VfsNode>> {
+    lookup_internal(path, true)
+}
+
+pub fn lookup_no_follow(path: &str) -> Option<Arc<VfsNode>> {
+    lookup_internal(path, false)
+}
+
+fn lookup_internal(path: &str, follow_last: bool) -> Option<Arc<VfsNode>> {
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
     if parts.is_empty() {
         return Some(ROOT.clone());
@@ -339,7 +369,7 @@ pub fn lookup(path: &str) -> Option<Arc<VfsNode>> {
                                             fnode.size = child_ino.size() as usize;
                                             fnode.file_ops = Some(Arc::new(Ext4FileOps {
                                                 fs: fs.clone(),
-                                               inode_nr: entry.inode,
+                                                inode_nr: entry.inode,
                                             }));
                                             children.push(Arc::new(fnode));
                                         }
@@ -364,17 +394,62 @@ pub fn lookup(path: &str) -> Option<Arc<VfsNode>> {
     
     let mut current = ROOT.clone();
     
-    for part in parts {
+    for (i, part) in parts.iter().enumerate() {
+        let is_last = i == parts.len() - 1;
         let mut found = None;
-        // Handle . and .. logic if needed here (simplified)
         for child in current.children.read().iter() {
-            if child.name == part {
+            if child.name == *part {
                 found = Some(child.clone());
                 break;
             }
         }
+        if found.is_none() {
+            for child in current.children.read().iter() {
+                if child.name.eq_ignore_ascii_case(part) {
+                    found = Some(child.clone());
+                    break;
+                }
+            }
+        }
         
         if let Some(child) = found {
+            if let NodeKind::SymLink(ref target) = child.kind {
+                if !is_last || follow_last {
+                    let target_node = if target.starts_with('/') {
+                        lookup(target)
+                    } else {
+                        // Relative symlink: resolve relative to parent directory `current`
+                        let mut cur_resolve = current.clone();
+                        let mut ok = true;
+                        for rel_part in target.split('/').filter(|s| !s.is_empty()) {
+                            if rel_part == "." {
+                                continue;
+                            } else if rel_part == ".." {
+                                continue;
+                            } else {
+                                let mut found_rel = None;
+                                for c in cur_resolve.children.read().iter() {
+                                    if c.name == rel_part || c.name.eq_ignore_ascii_case(rel_part) {
+                                        found_rel = Some(c.clone());
+                                        break;
+                                    }
+                                }
+                                if let Some(fr) = found_rel {
+                                    cur_resolve = fr;
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok { Some(cur_resolve) } else { None }
+                    };
+                    if let Some(tn) = target_node {
+                        current = tn;
+                        continue;
+                    }
+                }
+            }
             current = child;
         } else {
             return None;

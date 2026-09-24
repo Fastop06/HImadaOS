@@ -40,6 +40,14 @@ pub fn init(fdt_vaddr: usize) {
     }
 }
 
+pub fn has_byte() -> bool {
+    unsafe {
+        if !UART_MAPPED || UART_BASE == 0 { return false; }
+        let uart_fr = (UART_BASE + 0x18) as *const u32;
+        (core::ptr::read_volatile(uart_fr) & 0x10) == 0
+    }
+}
+
 pub fn read_byte() -> Option<u8> {
     unsafe {
         if !UART_MAPPED || UART_BASE == 0 { return None; }

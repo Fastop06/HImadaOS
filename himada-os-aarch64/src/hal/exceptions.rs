@@ -172,14 +172,21 @@ pub extern "C" fn exception_handler_c(ctx: *mut ExceptionContext, vector_id: u64
 
     let ec = (esr >> 26) & 0x3F; // Exception Class
 
-    if vector_id == 8 && (ec == 0x20 || ec == 0x24) {
-        // Instruction Abort or Data Abort from Userspace
-        crate::sys::exception::handle_user_fault(context, esr, far);
-        return;
-    } else if vector_id == 8 && ec == 0x15 {
-        // SVC instruction execution in AArch64 state (Syscall)
-        let ret = crate::sys::linux_abi::dispatch_syscall_ctx(context);
-        context.x[0] = ret; // Return value in x0
+    if vector_id == 8 {
+        if ec == 0x20 || ec == 0x24 {
+            // Instruction Abort or Data Abort from Userspace
+            crate::sys::exception::handle_user_fault(context, esr, far);
+            return;
+        } else if ec == 0x15 {
+            // SVC instruction execution in AArch64 state (Syscall)
+            let ret = crate::sys::linux_abi::dispatch_syscall_ctx(context);
+            context.x[0] = ret; // Return value in x0
+            return;
+        } else {
+            // Other user space exception (e.g. BRK ec=0x3c, undefined instruction, etc.)
+            crate::serial_println!("[EL0 Fault] Userspace process hit exception EC={:#x} (ESR={:#018x}, ELR={:#018x}). Terminating with SIGABRT...", ec, esr, context.elr);
+            crate::sys::linux_abi::sys_exit(134);
+        }
     } else {
         let vec_names = [
             "Curr-SP0-Sync", "Curr-SP0-IRQ", "Curr-SP0-FIQ", "Curr-SP0-SError",

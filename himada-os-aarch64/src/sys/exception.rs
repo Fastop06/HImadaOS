@@ -12,6 +12,7 @@ pub fn handle_user_fault(context: &mut ExceptionContext, esr: u64, far: u64) {
     for i in 0..31 {
         crate::serial_println!("X{:02} = {:#018x}", i, context.x[i]);
     }
+
     
     match ec {
         0x20 => crate::serial_println!("Instruction Abort from a lower Exception level"),
@@ -32,11 +33,6 @@ pub fn handle_user_fault(context: &mut ExceptionContext, esr: u64, far: u64) {
         }
     }
 
-    crate::serial_println!("Killing process...");
-    
-    // In Phase 3, this will call process::exit_current(139) and schedule next.
-    // For now, we halt.
-    loop {
-        unsafe { core::arch::asm!("wfe"); }
-    }
+    crate::serial_println!("Terminating faulted process (exit status 139 / SIGSEGV)...");
+    crate::sys::linux_abi::sys_exit(139);
 }

@@ -43,9 +43,16 @@ pub fn load_elf_image(
         }
     }
 
+    let is_dyn = file_data.len() > 18 && u16::from_le_bytes([file_data[16], file_data[17]]) == 3;
+    let load_bias: usize = if is_dyn {
+        0x0000_0000_0040_0000
+    } else {
+        0
+    };
+
     for ph in elf.program_iter() {
         if ph.get_type() == Ok(Type::Load) {
-            let vaddr = ph.virtual_addr() as usize;
+            let vaddr = load_bias + ph.virtual_addr() as usize;
             let mem_size = ph.mem_size() as usize;
             let file_size = ph.file_size() as usize;
             let offset = ph.offset() as usize;
@@ -97,7 +104,7 @@ pub fn load_elf_image(
         }
     }
 
-    let entry = elf.header.pt2.entry_point() as usize;
+    let entry = load_bias + elf.header.pt2.entry_point() as usize;
 
     let (final_entry, at_base) = if let Some(ref path) = interp_path {
         serial_println!("[ELF] Dynamic executable '{}' requests interpreter: {}", prog_name, path);
@@ -274,7 +281,7 @@ pub fn load_elf_image(
     let mut phdr_vaddr = 0;
     for ph in elf.program_iter() {
         if ph.get_type() == Ok(Type::Load) {
-            let vaddr = ph.virtual_addr() as usize;
+            let vaddr = load_bias + ph.virtual_addr() as usize;
             let offset = ph.offset() as usize;
             let file_size = ph.file_size() as usize;
             if offset <= ph_offset && ph_offset < offset + file_size {
@@ -284,7 +291,7 @@ pub fn load_elf_image(
         }
     }
     if phdr_vaddr == 0 {
-        phdr_vaddr = 0x400000 + ph_offset;
+        phdr_vaddr = load_bias + ph_offset;
     }
 
     // Auxiliary vector entries: (key, value)

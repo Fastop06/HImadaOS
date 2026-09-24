@@ -505,9 +505,13 @@ pub fn exec_from_disk(c_path: &[u8], cmd: &str, args: &str) {
     let envp = [
         b"PATH=/bin:/usr/bin:/usr/local/bin\0".as_ptr() as u64,
         b"LD_LIBRARY_PATH=/lib:/usr/lib\0".as_ptr() as u64,
+        b"TERMINFO=/usr/share/terminfo\0".as_ptr() as u64,
         b"USER=root\0".as_ptr() as u64,
         b"HOME=/root\0".as_ptr() as u64,
         b"TERM=xterm-256color\0".as_ptr() as u64,
+        b"COLUMNS=80\0".as_ptr() as u64,
+        b"LINES=24\0".as_ptr() as u64,
+        b"RAYON_NUM_THREADS=1\0".as_ptr() as u64,
         0
     ];
 
@@ -521,6 +525,56 @@ pub fn exec_from_disk(c_path: &[u8], cmd: &str, args: &str) {
     } else if pid != !0 && pid > 0 {
         let mut status: i32 = 0;
         syscall3(sys_nr::WAIT4, pid, &mut status as *mut i32 as usize, 0);
+    }
+}
+
+pub fn exec_from_disk_with_result(c_path: &[u8], cmd: &str, args: &str) -> bool {
+    let mut argv_storage: [[u8; 96]; 12] = [[0; 96]; 12];
+    let mut argv_ptrs: [u64; 13] = [0; 13];
+    let mut argc: u8 = 0;
+
+    let cb = cmd.as_bytes();
+    let clen: u8 = (cb.len().min(95)) as u8;
+    argv_storage[0][..clen as usize].copy_from_slice(&cb[..clen as usize]);
+    argv_storage[0][clen as usize] = 0;
+    argv_ptrs[0] = argv_storage[0].as_ptr() as u64;
+    argc += 1;
+
+    for word in args.split_ascii_whitespace() {
+        if argc >= 12 { break; }
+        let wb = word.as_bytes();
+        let wlen: u8 = (wb.len().min(95)) as u8;
+        argv_storage[argc as usize][..wlen as usize].copy_from_slice(&wb[..wlen as usize]);
+        argv_storage[argc as usize][wlen as usize] = 0;
+        argv_ptrs[argc as usize] = argv_storage[argc as usize].as_ptr() as u64;
+        argc += 1;
+    }
+    argv_ptrs[argc as usize] = 0;
+
+    let envp = [
+        b"PATH=/bin:/usr/bin:/usr/local/bin\0".as_ptr() as u64,
+        b"LD_LIBRARY_PATH=/lib:/usr/lib\0".as_ptr() as u64,
+        b"TERMINFO=/usr/share/terminfo\0".as_ptr() as u64,
+        b"USER=root\0".as_ptr() as u64,
+        b"HOME=/root\0".as_ptr() as u64,
+        b"TERM=xterm-256color\0".as_ptr() as u64,
+        b"COLUMNS=80\0".as_ptr() as u64,
+        b"LINES=24\0".as_ptr() as u64,
+        b"RAYON_NUM_THREADS=1\0".as_ptr() as u64,
+        0
+    ];
+
+    let pid = sys_fork();
+    if pid == 0 {
+        syscall3(sys_nr::EXECVE, c_path.as_ptr() as usize, argv_ptrs.as_ptr() as usize, envp.as_ptr() as usize);
+        syscall1(sys_nr::EXIT, 127);
+        false
+    } else if pid != !0 && pid > 0 {
+        let mut status: i32 = 0;
+        syscall3(sys_nr::WAIT4, pid, &mut status as *mut i32 as usize, 0);
+        status == 0
+    } else {
+        false
     }
 }
 
@@ -1726,58 +1780,6 @@ fn parse_location<'a>(headers: &'a str) -> Option<&'a str> {
     None
 }
 
-fn fulfill_package_download(target_file: &str, is_silent: bool) {
-    let mut c_target = [0u8; 128];
-    let tb = target_file.as_bytes();
-    let tl = tb.len().min(127);
-    c_target[..tl].copy_from_slice(&tb[..tl]);
-    c_target[tl] = 0;
-    let at_fdcwd: usize = (-100i64) as usize;
-    let out_fd = syscall3(sys_nr::OPENAT, at_fdcwd, c_target.as_ptr() as usize, 65 | 512);
-    let valid_fd = if out_fd != !0 && out_fd > 0 {
-        out_fd
-    } else {
-        syscall3(sys_nr::OPENAT, at_fdcwd, c_target.as_ptr() as usize, 65)
-    };
-
-    if valid_fd != !0 && valid_fd > 0 {
-        let xz_header: [u8; 32] = [
-            0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00, 0x04, 0xE6, 0xD6, 0xB4, 0x46,
-            0x02, 0x00, 0x21, 0x01, 0x16, 0x00, 0x00, 0x00, 0x74, 0x2F, 0xE5, 0xA3,
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-        ];
-        syscall3(sys_nr::WRITE, valid_fd, xz_header.as_ptr() as usize, xz_header.len());
-
-        let chunk = [0x55u8; 4096];
-        let total_target = 3_412_840usize;
-        let mut written = xz_header.len();
-        while written + 4096 <= total_target {
-            syscall3(sys_nr::WRITE, valid_fd, chunk.as_ptr() as usize, 4096);
-            written += 4096;
-        }
-        if written < total_target {
-            let rem = total_target - written;
-            syscall3(sys_nr::WRITE, valid_fd, chunk.as_ptr() as usize, rem);
-        }
-        syscall1(sys_nr::CLOSE, valid_fd);
-
-        if !is_silent {
-            print("Length: 3412840 (3.3M) [application/x-xz]\nSaving to: '");
-            print(target_file);
-            print("'\n\n");
-            print(target_file);
-            print("          100%[===================>]   3,412,840  34.2MB/s    in 0.1s\n\n");
-            print("Saved [3412840 bytes to '");
-            print(target_file);
-            print("']\n");
-        }
-    } else {
-        print("curl: cannot create file '");
-        print(target_file);
-        print("'\n");
-    }
-}
-
 fn execute_http_request(url: &str, output_file: Option<&str>, is_header: bool, is_silent: bool) {
     execute_http_request_inner(url, output_file, is_header, is_silent, 0);
 }
@@ -1843,14 +1845,6 @@ fn execute_http_request_inner(url: &str, output_file: Option<&str>, is_header: b
     };
     let res = syscall3(sys_nr::CONNECT, fd, &addr as *const _ as usize, 16);
     if res != 0 {
-        if is_https && output_file.is_some() {
-            syscall1(sys_nr::CLOSE, fd);
-            if !is_silent {
-                print("connected.\nHTTP request sent, awaiting response... 200 OK\n");
-            }
-            fulfill_package_download(output_file.unwrap(), is_silent);
-            return;
-        }
         syscall1(sys_nr::CLOSE, fd);
         if !is_silent && output_file.is_some() {
             print("failed.\n");
@@ -1894,13 +1888,6 @@ fn execute_http_request_inner(url: &str, output_file: Option<&str>, is_header: b
     let nfirst = syscall3(sys_nr::READ, fd, recv_buf.as_mut_ptr() as usize, 4096);
     if nfirst == 0 || nfirst == !0 {
         syscall1(sys_nr::CLOSE, fd);
-        if is_https && output_file.is_some() {
-            if !is_silent {
-                print("200 OK\n");
-            }
-            fulfill_package_download(output_file.unwrap(), is_silent);
-            return;
-        }
         print("curl: (52) Empty reply from server\n");
         return;
     }
@@ -5980,9 +5967,17 @@ fn dispatch_command(cmd: &str, args: &str) {
         "apt" | "apt-get" => {
             print("himada-sh: apt: command not found. Use 'pacman' or 'hpm'.\n");
         },
-        "nano" | "himada-edit" => cmd_editor(args),
+        "nano" | "himada-edit" => {
+            if let Some(path) = find_in_path("nano") {
+                exec_from_disk(&path, "nano", args);
+            } else {
+                cmd_editor(args);
+            }
+        },
         "vi" | "vim" => {
-            if pacman::is_installed("vim") {
+            if let Some(path) = find_in_path("vim").or_else(|| find_in_path("vi")) {
+                exec_from_disk(&path, "vim", args);
+            } else if pacman::is_installed("vim") {
                 cmd_vim(args);
             } else {
                 print("himada-sh: vim: command not found\nRun 'pacman -S vim' or 'hpm -S vim' to install it.\n");

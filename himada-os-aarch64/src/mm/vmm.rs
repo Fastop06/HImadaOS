@@ -186,6 +186,50 @@ pub unsafe fn clone_user_address_space(src_root: usize) -> usize {
     dst_root
 }
 
+pub unsafe fn destroy_user_address_space(root_paddr: usize) {
+    if root_paddr == 0 { return; }
+    let l0_src = phys_to_virt(root_paddr) as *mut u64;
+
+    // Scan userspace half (indices 0..256)
+    for l0 in 0..256 {
+        let e0 = core::ptr::read(l0_src.add(l0));
+        if e0 & 1 == 0 { continue; }
+        let l1_phys = (e0 & 0x0000_FFFF_FFFF_F000) as usize;
+        let l1_src = phys_to_virt(l1_phys) as *mut u64;
+
+        for l1 in 0..512 {
+            let e1 = core::ptr::read(l1_src.add(l1));
+            if e1 & 1 == 0 { continue; }
+            let l2_phys = (e1 & 0x0000_FFFF_FFFF_F000) as usize;
+            let l2_src = phys_to_virt(l2_phys) as *mut u64;
+
+            for l2 in 0..512 {
+                let e2 = core::ptr::read(l2_src.add(l2));
+                if e2 & 1 == 0 { continue; }
+                let l3_phys = (e2 & 0x0000_FFFF_FFFF_F000) as usize;
+                let l3_src = phys_to_virt(l3_phys) as *mut u64;
+
+                for l3 in 0..512 {
+                    let e3 = core::ptr::read(l3_src.add(l3));
+                    if e3 & 0b11 != 0b11 { continue; }
+
+                    let paddr = (e3 & 0x0000_FFFF_FFFF_F000) as usize;
+                    let vaddr = (l0 << 39) | (l1 << 30) | (l2 << 21) | (l3 << 12);
+
+                    // Skip identity-mapped device MMIO regions (< 1GB or high device space)
+                    if !(vaddr == paddr || paddr < 0x4000_0000 || paddr >= 0x8000_0000_00) {
+                        super::pmm::free_frame(paddr);
+                    }
+                }
+                super::pmm::free_frame(l3_phys);
+            }
+            super::pmm::free_frame(l2_phys);
+        }
+        super::pmm::free_frame(l1_phys);
+    }
+    super::pmm::free_frame(root_paddr);
+}
+
 pub unsafe fn map_user_page_flags(vaddr: usize, paddr: usize, writable: bool, executable: bool) {
     let root_paddr: usize;
     if vaddr >= 0xFFFF_0000_0000_0000 {

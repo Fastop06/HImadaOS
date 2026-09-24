@@ -18,6 +18,12 @@ echo "[2/6] Building x86_64 Userspace Payload (HimadaOS Server Shell)..."
 cargo rustc --target x86_64-unknown-none --release -- -C relocation-model=static -C link-arg=-Tlinker.ld
 cp target/x86_64-unknown-none/release/hello-linux "$SCRATCH/himada-os/payload.elf"
 
+echo "[2.5/6] Building himada-pkg-extract (AArch64 & x86_64)..."
+cd "$SCRATCH/himada-pkg-extract"
+RUSTFLAGS="-C linker=rust-lld" cargo build --target aarch64-unknown-linux-musl --release
+RUSTFLAGS="-C linker=rust-lld" cargo build --target x86_64-unknown-linux-musl --release
+cd "$SCRATCH"
+
 # 2. Build Kernels
 echo "[3/6] Building HimadaOS ARM64 Kernel (Release Mode)..."
 cd "$SCRATCH/himada-os-aarch64"
@@ -37,7 +43,7 @@ mkdir -p initramfs/etc/apache2 initramfs/etc/network initramfs/etc/systemd/syste
 mkdir -p initramfs/usr/bin initramfs/usr/sbin initramfs/usr/lib initramfs/usr/share
 mkdir -p initramfs/var/log/apache2 initramfs/var/www/localhost/htdocs initramfs/root initramfs/home
 mkdir -p initramfs/var/lib/pacman/local initramfs/var/cache/pacman/pkg initramfs/var/lib/pacman/sync/core initramfs/etc/pacman.d
-for pkg in base-3-2 coreutils-9.5-1 linux-himada-6.8.0-1 himada-sh-2.0-1 pacman-6.1.0-3 nano-8.0-1 fastfetch-2.21.1-1 curl-8.8.0-1 dropbear-2024.84-1; do
+for pkg in base-3-2 coreutils-9.5-1 linux-himada-6.8.0-1 himada-sh-2.0-1 pacman-6.1.0-3 fastfetch-2.21.1-1 dropbear-2024.84-1; do
   mkdir -p initramfs/var/lib/pacman/local/$pkg
   echo -e "%NAME%\n${pkg%-*}\n\n%VERSION%\n${pkg##*-}\n" > initramfs/var/lib/pacman/local/$pkg/desc
 done
@@ -248,6 +254,8 @@ DMESG
 cat << 'BASHRC' > initramfs/root/.bashrc
 # ~/.bashrc: executed by bash(1) for non-login shells.
 export PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]# '
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
 alias ls='ls --color=auto'
 alias ll='ls -alF'
 alias la='ls -A'
@@ -255,6 +263,8 @@ alias l='ls -CF'
 BASHRC
 
 cat << 'PROFILE' > initramfs/root/.profile
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
 if [ "$BASH" ]; then
   if [ -f ~/.bashrc ]; then
     . ~/.bashrc
@@ -264,20 +274,17 @@ PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 PROFILE
 
 # Create standard Linux binary markers
-for bin in ls cat echo cp mv rm mkdir touch ps ping ip systemctl pacman nano fastfetch md5sum base64 date uptime free df curl wget; do
+for bin in ls cat echo cp mv rm mkdir touch ps ping ip systemctl pacman fastfetch md5sum base64 date uptime free df; do
   touch initramfs/bin/$bin
   chmod +x initramfs/bin/$bin
 done
 
-# Install real ELF executables for bash, sh, pacman, nano, fastfetch, md5sum, base64, himada-shell, musl_test
+# Install real ELF executables for bash, sh, pacman, fastfetch, md5sum, base64, himada-shell, musl_test
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/bash
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/sh
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/himada-sh
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/pacman
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/hpm
-cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/nano
-cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/curl
-cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/wget
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/fastfetch
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/md5sum
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/base64
@@ -285,27 +292,35 @@ cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/bin/himada-shell
 mkdir -p initramfs/usr/bin
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/pacman
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/hpm
-cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/curl
-cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/wget
-cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/nano
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/fastfetch
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/md5sum
 cp "$SCRATCH/himada-os-aarch64/payload.elf" initramfs/usr/bin/base64
 rustc --target aarch64-unknown-linux-musl -C linker=rust-lld -C relocation-model=static -C link-arg=-s -C opt-level=2 "$SCRATCH/musl_test.rs" -o initramfs/bin/musl_test
 
-# Populate package repository and cache with REAL compiled static ELFs
+# Install himada-pkg-extract
+cp "$SCRATCH/himada-pkg-extract/target/aarch64-unknown-linux-musl/release/himada-pkg-extract" initramfs/bin/himada-pkg-extract
+cp "$SCRATCH/himada-pkg-extract/target/aarch64-unknown-linux-musl/release/himada-pkg-extract" initramfs/usr/bin/himada-pkg-extract
+cp "$SCRATCH/himada-pkg-extract/target/aarch64-unknown-linux-musl/release/himada-pkg-extract" initramfs/bin/tar
+chmod +x initramfs/bin/himada-pkg-extract initramfs/usr/bin/himada-pkg-extract initramfs/bin/tar
+
+# Populate package repository and cache with REAL official packages
 mkdir -p initramfs/var/cache/pacman/pkg initramfs/repo
-if [ -d "$SCRATCH/pkg_mirror/pkg_db" ]; then
-  cp "$SCRATCH/pkg_mirror/pkg_db"/* initramfs/var/cache/pacman/pkg/
-  cp "$SCRATCH/pkg_mirror/pkg_db"/* initramfs/repo/
-  chmod +x initramfs/var/cache/pacman/pkg/* initramfs/repo/*
+if [ -d "$SCRATCH/pkg_mirror/packages" ]; then
+  cp "$SCRATCH/pkg_mirror/packages"/* initramfs/var/cache/pacman/pkg/ 2>/dev/null || true
+  cp "$SCRATCH/pkg_mirror/packages"/* initramfs/repo/ 2>/dev/null || true
 fi
 
-# Populate Glibc runtime libraries and dynamic linker for ARM64
+
+# Populate Glibc runtime libraries and dynamic linker for ARM64 (dereference symlinks with -RL)
 if [ -d "$SCRATCH/glibc_runtime" ]; then
-  mkdir -p initramfs/lib initramfs/usr/lib initramfs/etc
-  cp "$SCRATCH/glibc_runtime/lib"/* initramfs/lib/ 2>/dev/null || true
-  cp "$SCRATCH/glibc_runtime/usr/lib"/* initramfs/usr/lib/ 2>/dev/null || true
+  mkdir -p initramfs/lib initramfs/usr/lib initramfs/usr/share initramfs/etc
+  cp -RL "$SCRATCH/glibc_runtime/lib"/* initramfs/lib/ 2>/dev/null || true
+  cp -RL "$SCRATCH/glibc_runtime/usr/lib"/* initramfs/usr/lib/ 2>/dev/null || true
+  if [ -d "$SCRATCH/glibc_runtime/usr/share/terminfo" ]; then
+    mkdir -p initramfs/usr/share/terminfo initramfs/etc/terminfo
+    cp -RL "$SCRATCH/glibc_runtime/usr/share/terminfo"/* initramfs/usr/share/terminfo/ 2>/dev/null || true
+    cp -RL "$SCRATCH/glibc_runtime/usr/share/terminfo"/* initramfs/etc/terminfo/ 2>/dev/null || true
+  fi
   cp "$SCRATCH/glibc_runtime/etc/ld.so.conf" initramfs/etc/ 2>/dev/null || true
   if [ -f "$SCRATCH/glibc_runtime/bin/glibc_test" ]; then
     cp "$SCRATCH/glibc_runtime/bin/glibc_test" initramfs/bin/glibc_test
@@ -404,8 +419,9 @@ xorriso -as mkisofs \
 
 # Deploy to User Desktop
 mkdir -p ~/Desktop/HimadaOS_Final
-cp "$SCRATCH/himada-os-arm64.iso" ~/Desktop/HimadaOS_Final/
-cp "$SCRATCH/himada-os-x86_64.iso" ~/Desktop/HimadaOS_Final/
+rm -f ~/Desktop/HimadaOS_Final/himada-os-arm64.iso ~/Desktop/HimadaOS_Final/himada-os-x86_64.iso
+cp "$SCRATCH/himada-os-arm64.iso" ~/Desktop/HimadaOS_Final/ 2>/dev/null || true
+cp "$SCRATCH/himada-os-x86_64.iso" ~/Desktop/HimadaOS_Final/ 2>/dev/null || true
 
 echo "=================================================="
 echo "  Build Completed Successfully!                  "

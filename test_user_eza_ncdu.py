@@ -13,7 +13,7 @@ cmd = [
     "-cpu", "cortex-a72",
     "-m", "1024M",
     "-bios", "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
-    "-cdrom", "/Users/mussavysegurov/Desktop/HimadaOS_Final/himada-os-arm64.iso",
+    "-cdrom", "/Users/mussavysegurov/.gemini/antigravity/scratch/himada-os-arm64.iso",
     "-drive", "file=/Users/mussavysegurov/.gemini/antigravity/scratch/disk.img,format=raw,if=virtio",
     "-device", "virtio-net-device,netdev=net0",
     "-netdev", "user,id=net0",
@@ -69,10 +69,39 @@ def drain_input():
 def run_cmd(cmd_str, timeout=15):
     drain_input()
     time.sleep(0.2)
+    # Clear any residual line characters
+    os.write(master, b"\x15") # Ctrl+U
+    time.sleep(0.05)
     print(f"\n>>> Running: {cmd_str}")
     os.write(master, cmd_str.encode('utf-8') + b"\n")
-    res = read_until("]# ", timeout=timeout)
-    return res
+    buf = ""
+    start = time.time()
+    replied = False
+    ncdu_replied = False
+    while time.time() - start < timeout:
+        try:
+            r, _, _ = select.select([master], [], [], 0.1)
+            if r:
+                data = os.read(master, 1024)
+                if not data:
+                    break
+                s = data.decode('utf-8', errors='replace')
+                buf += s
+                sys.stdout.write(s)
+                sys.stdout.flush()
+                if "[Y/n]" in buf and not replied:
+                    time.sleep(0.1)
+                    os.write(master, b"y\n")
+                    replied = True
+                if "ncdu 2.9.2" in buf and "ncdu /root" in cmd_str and not ncdu_replied:
+                    ncdu_replied = True
+                    time.sleep(0.3)
+                    os.write(master, b"q")
+                if "]# " in buf:
+                    return buf
+        except OSError:
+            break
+    return buf
 
 results = {}
 
@@ -94,7 +123,7 @@ results['install_eza'] = ("installing eza" in res3) and ("error: target not foun
 # Test 4: Run real eza --version binary
 print("\n=== Test 4: Run eza --version ===")
 res4 = run_cmd("eza --version")
-results['exec_eza_ver'] = ("eza v0.23.5" in res4)
+results['exec_eza_ver'] = ("v0.23.5" in res4)
 
 # Test 5: Run real eza -la /root
 print("\n=== Test 5: Run eza -la /root ===")

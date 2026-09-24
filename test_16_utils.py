@@ -7,7 +7,7 @@ Each utility: install → verify real execution (not UI refresh) → remove
 """
 import subprocess, pty, os, time, sys, select
 
-QEMU_ISO = "/Users/mussavysegurov/Desktop/HimadaOS_Final/himada-os-arm64.iso"
+QEMU_ISO = "/Users/mussavysegurov/.gemini/antigravity/scratch/himada-os-arm64.iso"
 DISK_IMG  = "/Users/mussavysegurov/.gemini/antigravity/scratch/disk.img"
 
 UTILITIES = [
@@ -31,7 +31,7 @@ UTILITIES = [
     ("vim",     "vim",     "vim --version",      ["VIM", "vim"]),
     # nano: --version exits immediately without interactive mode
     ("nano",    "nano",    "nano --version",     ["nano"]),
-    ("tmux",    "tmux",    "tmux -V",            ["tmux"]),
+    ("tmux",    "tmux",    "tmux -u -V",         ["tmux"]),
     ("rsync",   "rsync",   "rsync --version",    ["rsync"]),
 ]
 
@@ -41,7 +41,7 @@ cmd = [
     "qemu-system-aarch64",
     "-machine", "virt",
     "-cpu", "cortex-a72",
-    "-m", "1024M",
+    "-m", "2048M",
     "-bios", "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
     "-cdrom", QEMU_ISO,
     "-drive", f"file={DISK_IMG},format=raw,if=virtio",
@@ -87,6 +87,8 @@ def drain():
 def run_cmd(cmd_str: str, timeout: float = 20, stdin_reply: str = "") -> str:
     drain()
     time.sleep(0.15)
+    os.write(master, b"\x15") # Ctrl+U
+    time.sleep(0.05)
     print(f"\n>>> {cmd_str}")
     os.write(master, cmd_str.encode() + b"\n")
     if stdin_reply:
@@ -155,19 +157,23 @@ for pkg, bin_name, version_cmd, expect_words in UTILITIES:
     # 3. Execute — check it's a REAL binary (not UI refresh)
     e_out = run_cmd(version_cmd, timeout=12)
 
-    # "UI refresh" means we got another prompt WITHOUT any tool output
-    stripped = e_out.strip()
-    lines = [l for l in stripped.splitlines() if bin_name not in l]
-    content_lines = [l.strip() for l in lines if l.strip() and "]#" not in l]
+    # Filter out echoed command and shell prompts to find actual tool output
+    raw_lines = [l.strip() for l in e_out.splitlines()]
+    content_lines = [
+        l for l in raw_lines
+        if l and "]#" not in l and l != version_cmd.strip() and not l.endswith(version_cmd.strip())
+    ]
     has_real_output = len(content_lines) > 0
     matches_expected = any(w.lower() in e_out.lower() for w in expect_words)
-    not_a_stub = "command not found" not in e_out and "not found" not in e_out
+    not_a_stub = "command not found" not in e_out and "not found" not in e_out and "cannot open shared" not in e_out
 
-    exec_ok = install_ok and has_real_output and not_a_stub
+    exec_ok = install_ok and has_real_output and not_a_stub and matches_expected
+    first_line = content_lines[0][:50] if content_lines else ""
     record(f"{pkg}_exec", exec_ok,
-           "real output" if exec_ok else
-           ("command not found" if not not_a_stub else
-            "no output / UI refresh"))
+           f"real output: {first_line}" if exec_ok else
+           ("missing shared library / command not found" if not not_a_stub else
+            ("missing expected keyword" if not matches_expected else
+             "no output / UI refresh")))
 
     # 4. Remove
     r_out = run_cmd(f"pacman -R --noconfirm {pkg}", timeout=15)

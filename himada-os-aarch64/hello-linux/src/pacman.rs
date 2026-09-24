@@ -35,7 +35,7 @@ pub static mut DYN_PACKAGES: [DynamicPackageInfo; 128] = [DynamicPackageInfo {
     valid: false,
 }; 128];
 
-pub static mut REPO_PACKAGES: [PackageInfo; 65] = [
+pub static mut REPO_PACKAGES: [PackageInfo; 73] = [
     // Core system
     PackageInfo { name: "base", version: "3-2", desc: "Minimal package set to define a basic HimadaOS installation", repo: "core", size_kib: 4096, installed: true },
     PackageInfo { name: "coreutils", version: "9.5-1", desc: "The basic file, shell and text manipulation utilities of the GNU operating system", repo: "core", size_kib: 15360, installed: true },
@@ -102,8 +102,16 @@ pub static mut REPO_PACKAGES: [PackageInfo; 65] = [
     PackageInfo { name: "openssl", version: "3.3.1-1", desc: "Toolkit for Secure Sockets Layer and Transport Layer Security", repo: "core", size_kib: 12000, installed: false },
     PackageInfo { name: "zip", version: "3.0-11", desc: "Compressor and archiver utility for ZIP files", repo: "extra", size_kib: 850, installed: false },
     PackageInfo { name: "unzip", version: "6.0-20", desc: "Extraction utility for ZIP archives", repo: "extra", size_kib: 920, installed: false },
-    PackageInfo { name: "zstd", version: "1.5.6-1", desc: "Zstandard - Fast real-time compression algorithm", repo: "core", size_kib: 2200, installed: false },
+    PackageInfo { name: "zstd", version: "1.5.7-3", desc: "Zstandard - Fast real-time compression algorithm", repo: "core", size_kib: 426, installed: false },
     PackageInfo { name: "patch", version: "2.7.6-10", desc: "A utility to apply diff files to original files", repo: "core", size_kib: 450, installed: false },
+    PackageInfo { name: "eza", version: "0.23.5-2", desc: "A modern replacement for ls (community fork of exa)", repo: "extra", size_kib: 573, installed: false },
+    PackageInfo { name: "ncdu", version: "2.9.2-1", desc: "Disk usage analyzer with an ncurses interface", repo: "extra", size_kib: 188, installed: false },
+    PackageInfo { name: "yazi", version: "26.9.1-2", desc: "Blazing fast terminal file manager written in Rust, based on async I/O", repo: "extra", size_kib: 9592, installed: false },
+    PackageInfo { name: "bat", version: "0.26.1-3", desc: "Cat clone with syntax highlighting and git integration", repo: "extra", size_kib: 2246, installed: false },
+    PackageInfo { name: "fd", version: "10.5.0-3", desc: "Simple, fast and user-friendly alternative to find", repo: "extra", size_kib: 940, installed: false },
+    PackageInfo { name: "ripgrep", version: "15.2.0-1", desc: "A search tool that combines the usability of ag with the raw speed of grep", repo: "extra", size_kib: 1153, installed: false },
+    PackageInfo { name: "fzf", version: "0.74.4-1", desc: "Command-line fuzzy finder", repo: "extra", size_kib: 1588, installed: false },
+    PackageInfo { name: "rsync", version: "3.5.1-1", desc: "A file transfer program to keep remote files into sync", repo: "extra", size_kib: 396, installed: false },
 ];
 
 pub fn is_installed(name: &str) -> bool {
@@ -197,6 +205,19 @@ pub fn get_active_mirror(buf: &mut [u8; 128]) -> &str {
 }
 
 pub fn extract_tar_archive(tar_path: &str) -> bool {
+    let extractor_path = b"/bin/himada-pkg-extract\0";
+    if crate::file_exists_on_disk("/bin/himada-pkg-extract") {
+        if crate::exec_from_disk_with_result(extractor_path, "himada-pkg-extract", tar_path) {
+            return true;
+        }
+    }
+    let extractor_usr = b"/usr/bin/himada-pkg-extract\0";
+    if crate::file_exists_on_disk("/usr/bin/himada-pkg-extract") {
+        if crate::exec_from_disk_with_result(extractor_usr, "himada-pkg-extract", tar_path) {
+            return true;
+        }
+    }
+
     let at_fdcwd: usize = (-100i64) as usize;
     let mut path_buf = [0u8; 128];
     let pb = tar_path.as_bytes();
@@ -954,7 +975,7 @@ removing unused sync databases...
 ");
                 return;
             }
-            remove_packages(&targets[..target_count], &mut print_fn);
+            remove_packages(&targets[..target_count], sub_noconfirm, &mut print_fn);
         }
         'U' => {
             if target_count == 0 {
@@ -1082,7 +1103,7 @@ pub fn copy_elf_binary(src: &str, dst: &str) {
     }
 }
 
-pub fn install_package_payload(name: &str, version: &str) {
+pub fn install_package_payload(name: &str, version: &str) -> bool {
     let nb = name.as_bytes();
     let nl = nb.len().min(50);
     let vb = version.as_bytes();
@@ -1098,9 +1119,58 @@ pub fn install_package_payload(name: &str, version: &str) {
     dest_bin[5..5+nl].copy_from_slice(&nb[..nl]);
     let dest_bin_str = core::str::from_utf8(&dest_bin[..5+nl]).unwrap_or("/bin/tool");
 
+    let mut dp = DynamicPackageInfo {
+        name: [0; 32],
+        version: [0; 24],
+        desc: [0; 96],
+        repo: [0; 16],
+        filename: [0; 64],
+        size_kib: 0,
+        installed: false,
+        valid: false,
+    };
+    let has_index_info = lookup_package_in_index(name, &mut dp);
+    let pkg_repo = if has_index_info {
+        let rl = dp.repo.iter().position(|&b| b == 0).unwrap_or(dp.repo.len());
+        core::str::from_utf8(&dp.repo[..rl]).unwrap_or("extra")
+    } else {
+        "extra"
+    };
+    let pkg_filename = if has_index_info {
+        let fl = dp.filename.iter().position(|&b| b == 0).unwrap_or(dp.filename.len());
+        core::str::from_utf8(&dp.filename[..fl]).unwrap_or("")
+    } else {
+        ""
+    };
+
+    // Candidate 0: /var/cache/pacman/pkg/<pkg_filename>
+    let mut cand0 = [0u8; 128];
+    let p1 = b"/var/cache/pacman/pkg/";
+    cand0[..p1.len()].copy_from_slice(p1);
+    let mut l0 = p1.len();
+    if !pkg_filename.is_empty() {
+        let pfb = pkg_filename.as_bytes();
+        let pfl = pfb.len().min(127 - l0);
+        cand0[l0..l0+pfl].copy_from_slice(&pfb[..pfl]);
+        l0 += pfl;
+    }
+    let cand0_str = if !pkg_filename.is_empty() { core::str::from_utf8(&cand0[..l0]).unwrap_or("") } else { "" };
+
+    // Candidate 0b: /repo/<pkg_filename>
+    let mut cand0b = [0u8; 128];
+    let pr = b"/repo/";
+    cand0b[..pr.len()].copy_from_slice(pr);
+    let mut l0b = pr.len();
+    if !pkg_filename.is_empty() {
+        let pfb = pkg_filename.as_bytes();
+        let pfl = pfb.len().min(127 - l0b);
+        cand0b[l0b..l0b+pfl].copy_from_slice(&pfb[..pfl]);
+        l0b += pfl;
+    }
+    let cand0b_str = if !pkg_filename.is_empty() { core::str::from_utf8(&cand0b[..l0b]).unwrap_or("") } else { "" };
+
     // Candidate 1: /var/cache/pacman/pkg/<name>-<version>.pkg
     let mut cand1 = [0u8; 128];
-    let p1 = b"/var/cache/pacman/pkg/";
     cand1[..p1.len()].copy_from_slice(p1);
     let mut l1 = p1.len();
     cand1[l1..l1+nl].copy_from_slice(&nb[..nl]); l1 += nl;
@@ -1127,7 +1197,6 @@ pub fn install_package_payload(name: &str, version: &str) {
 
     // Candidate 4: /repo/<name>-<version>.pkg
     let mut cand4 = [0u8; 128];
-    let pr = b"/repo/";
     cand4[..pr.len()].copy_from_slice(pr);
     let mut l4 = pr.len();
     cand4[l4..l4+nl].copy_from_slice(&nb[..nl]); l4 += nl;
@@ -1144,84 +1213,72 @@ pub fn install_package_payload(name: &str, version: &str) {
     cand5[l5..l5+4].copy_from_slice(b".bin"); l5 += 4;
     let cand5_str = core::str::from_utf8(&cand5[..l5]).unwrap_or("");
 
-    let mut installed = false;
-    for &cand in &[cand1_str, cand2_str, cand3_str, cand4_str, cand5_str] {
+    for &cand in &[cand0_str, cand0b_str, cand1_str, cand2_str, cand3_str, cand4_str, cand5_str] {
         if !cand.is_empty() && crate::file_exists_on_disk(cand) {
             if extract_tar_archive(cand) {
-                installed = true;
-                break;
-            } else {
-                copy_package_file(cand, dest_usr_str);
+                return true;
+            } else if copy_package_file(cand, dest_usr_str) {
                 copy_package_file(cand, dest_bin_str);
-                installed = true;
-                break;
+                return true;
             }
         }
     }
 
-    if !installed {
-        // Try official mirror download
-        let mut mbuf = [0u8; 128];
-        let mirror = get_active_mirror(&mut mbuf);
-        let mut url_buf = [0u8; 256];
-        let mut ulen = 0;
-        let mb = mirror.as_bytes();
-        url_buf[..mb.len()].copy_from_slice(mb); ulen += mb.len();
-        if !mirror.ends_with('/') {
-            url_buf[ulen] = b'/'; ulen += 1;
-        }
+    // Try official mirror download
+    let mut mbuf = [0u8; 128];
+    let mirror = get_active_mirror(&mut mbuf);
+    let mut url_buf = [0u8; 256];
+    let mut ulen = 0;
 
-        let mut ver_buf = [0u8; 32];
-        let mut fname_buf = [0u8; 64];
-        let mut desc_buf = [0u8; 128];
-        let pkg_filename = if find_package_in_sync_db(name, &mut ver_buf, &mut fname_buf, &mut desc_buf) {
-            core::str::from_utf8(&fname_buf).unwrap_or("").trim_matches(char::from(0))
-        } else {
-            ""
-        };
+    let base_mirror = if let Some(idx) = mirror.find("/aarch64/") {
+        &mirror[..idx + "/aarch64/".len()]
+    } else if let Some(idx) = mirror.find("/$repo") {
+        &mirror[..idx]
+    } else {
+        "http://mirror.archlinuxarm.org/aarch64/"
+    };
 
-        let file_to_fetch = if !pkg_filename.is_empty() {
-            pkg_filename
-        } else {
-            name
-        };
+    let bb = base_mirror.as_bytes();
+    let bl = bb.len().min(128);
+    url_buf[..bl].copy_from_slice(&bb[..bl]); ulen += bl;
+    if !base_mirror.ends_with('/') {
+        url_buf[ulen] = b'/'; ulen += 1;
+    }
 
-        let fb = file_to_fetch.as_bytes();
-        let fl = fb.len().min(256 - ulen);
-        url_buf[ulen..ulen+fl].copy_from_slice(&fb[..fl]); ulen += fl;
+    let rb = pkg_repo.as_bytes();
+    let rl = rb.len().min(16);
+    url_buf[ulen..ulen+rl].copy_from_slice(&rb[..rl]); ulen += rl;
+    url_buf[ulen] = b'/'; ulen += 1;
 
-        if let Ok(url_str) = core::str::from_utf8(&url_buf[..ulen]) {
-            let mut cache_path = [0u8; 128];
-            let cpfx = b"/var/cache/pacman/pkg/";
-            cache_path[..cpfx.len()].copy_from_slice(cpfx);
-            let mut cl = cpfx.len();
-            cache_path[cl..cl+fl].copy_from_slice(&fb[..fl]); cl += fl;
-            if let Ok(cpath_str) = core::str::from_utf8(&cache_path[..cl]) {
-                if crate::http_download_to_file(url_str, cpath_str) {
-                    if extract_tar_archive(cpath_str) {
-                        installed = true;
-                    } else {
-                        copy_package_file(cpath_str, dest_usr_str);
-                        copy_package_file(cpath_str, dest_bin_str);
-                        installed = true;
-                    }
+    let file_to_fetch = if !pkg_filename.is_empty() {
+        pkg_filename
+    } else {
+        name
+    };
+
+    let fb = file_to_fetch.as_bytes();
+    let fl = fb.len().min(256 - ulen);
+    url_buf[ulen..ulen+fl].copy_from_slice(&fb[..fl]); ulen += fl;
+
+    if let Ok(url_str) = core::str::from_utf8(&url_buf[..ulen]) {
+        let mut cache_path = [0u8; 128];
+        let cpfx = b"/var/cache/pacman/pkg/";
+        cache_path[..cpfx.len()].copy_from_slice(cpfx);
+        let mut cl = cpfx.len();
+        cache_path[cl..cl+fl].copy_from_slice(&fb[..fl]); cl += fl;
+        if let Ok(cpath_str) = core::str::from_utf8(&cache_path[..cl]) {
+            if crate::http_download_to_file(url_str, cpath_str) {
+                if extract_tar_archive(cpath_str) {
+                    return true;
+                } else if copy_package_file(cpath_str, dest_usr_str) {
+                    copy_package_file(cpath_str, dest_bin_str);
+                    return true;
                 }
             }
         }
-
-        if !installed {
-            // Fallback to pkg-mirror (10.0.2.2:8080)
-            if download_and_install_real(name, version) {
-                copy_package_file(dest_usr_str, dest_bin_str);
-                installed = true;
-            }
-        }
     }
 
-    // If not installed by any method, do NOT copy himada-sh as stub —
-    // that would cause the shell to "re-render" when the user runs the tool.
-    // The package entry is already marked installed in DYN_PACKAGES so queries
-    // still work; the binary simply didn't land locally (network unavailable).
+    false
 }
 
 
@@ -1279,6 +1336,29 @@ fn sysupgrade<F: FnMut(&str)>(print_fn: &mut F) {
 ");
     print_fn(" there is nothing to do
 ");
+}
+
+fn prompt_confirm() -> bool {
+    let mut ibuf = [0u8; 16];
+    let mut nread = 0;
+    loop {
+        let mut b = 0u8;
+        let n = crate::syscall3(crate::sys_nr::READ, 0, core::ptr::addr_of_mut!(b) as usize, 1);
+        if n == 1 && b != 0 {
+            crate::syscall3(crate::sys_nr::WRITE, 1, core::ptr::addr_of!(b) as usize, 1);
+            if b == b'\n' || b == b'\r' {
+                break;
+            }
+            if nread < ibuf.len() {
+                ibuf[nread] = b;
+                nread += 1;
+            }
+        } else {
+            crate::syscall0(crate::sys_nr::SCHED_YIELD);
+        }
+    }
+    let first = if nread > 0 { ibuf[0] } else { b'y' };
+    !(first == b'n' || first == b'N')
 }
 
 fn install_packages<F: FnMut(&str)>(targets: &[&str], noconfirm: bool, print_fn: &mut F) {
@@ -1360,24 +1440,13 @@ fn install_packages<F: FnMut(&str)>(targets: &[&str], noconfirm: bool, print_fn:
         print_fn(" MiB\n\n");
 
         print_fn(":: Proceed with installation? [Y/n] ");
-        // Flush by reading stdin only when not in noconfirm mode
         if noconfirm {
             print_fn("Y\n");
         } else {
-            // Read one line from stdin (fd=0) via raw SYS_READ syscall
-            let mut ibuf = [0u8; 16];
-            let nread = crate::syscall3(crate::sys_nr::READ, 0, ibuf.as_mut_ptr() as usize, ibuf.len());
-            // Echo the input
-            if nread > 0 {
-                crate::syscall3(crate::sys_nr::WRITE, 1, ibuf.as_ptr() as usize, nread);
-            }
-            // Abort if user typed 'n' or 'N'
-            let first = if nread > 0 { ibuf[0] } else { b'\n' };
-            if first == b'n' || first == b'N' {
+            if !prompt_confirm() {
                 print_fn(":: Aborting...\n");
                 return;
             }
-            print_fn("\n");
         }
         print_fn("(1/1) checking keys in keyring                     [######################] 100%\n");
         print_fn("(1/1) checking package integrity                   [######################] 100%\n");
@@ -1389,12 +1458,10 @@ fn install_packages<F: FnMut(&str)>(targets: &[&str], noconfirm: bool, print_fn:
         for i in 0..valid_count as usize {
             let (idx, is_repo) = valid_indices[i];
             let (pkg_name, pkg_version) = if is_repo {
-                let pkg = &mut REPO_PACKAGES[idx];
-                pkg.installed = true;
+                let pkg = &REPO_PACKAGES[idx];
                 (pkg.name, pkg.version)
             } else {
-                let dp = &mut DYN_PACKAGES[idx];
-                dp.installed = true;
+                let dp = &DYN_PACKAGES[idx];
                 let nl = dp.name.iter().position(|&b| b == 0).unwrap_or(dp.name.len());
                 let vl = dp.version.iter().position(|&b| b == 0).unwrap_or(dp.version.len());
                 (core::str::from_utf8(&dp.name[..nl]).unwrap_or(""), core::str::from_utf8(&dp.version[..vl]).unwrap_or(""))
@@ -1408,7 +1475,17 @@ fn install_packages<F: FnMut(&str)>(targets: &[&str], noconfirm: bool, print_fn:
             print_fn(pkg_name);
             print_fn("                               [######################] 100%\n");
 
-            install_package_payload(pkg_name, pkg_version);
+            let ok = install_package_payload(pkg_name, pkg_version);
+            if !ok {
+                print_fn("error: failed to commit transaction (failed to retrieve or extract package)\n");
+                continue;
+            }
+
+            if is_repo {
+                REPO_PACKAGES[idx].installed = true;
+            } else {
+                DYN_PACKAGES[idx].installed = true;
+            }
 
             let nb = pkg_name.as_bytes();
             let nl = nb.len().min(50);
@@ -1450,58 +1527,67 @@ fn install_local_archive<F: FnMut(&str)>(path: &str, print_fn: &mut F) {
         basename.split('.').next().unwrap_or(basename)
     };
 
-    print_fn("loading packages...
-");
-    print_fn("resolving dependencies...
-");
-    print_fn("looking for conflicting packages...
-
-");
+    print_fn("loading packages...\n");
+    print_fn("resolving dependencies...\n");
+    print_fn("looking for conflicting packages...\n\n");
 
     print_fn("Packages (1) ");
     print_fn(pkg_name);
-    print_fn("-himada-local
+    print_fn("-himada-local\n\n");
 
-");
+    print_fn("Total Installed Size:  3.4 MiB\n\n");
+    print_fn(":: Proceed with installation? [Y/n] ");
 
-    print_fn("Total Installed Size:  3.4 MiB
+    if !prompt_confirm() {
+        print_fn(":: Aborting...\n");
+        return;
+    }
 
-");
-    print_fn(":: Proceed with installation? [Y/n] Y
-");
-    print_fn("(1/1) checking package integrity                   [######################] 100%
-");
-    print_fn("(1/1) loading package files                        [######################] 100%
-");
-    print_fn("(1/1) checking for file conflicts                  [######################] 100%
-");
-    print_fn("(1/1) checking available disk space                [######################] 100%
-");
-    print_fn(":: Processing package changes...
-");
+    print_fn("(1/1) checking package integrity                   [######################] 100%\n");
+    print_fn("(1/1) loading package files                        [######################] 100%\n");
+    print_fn("(1/1) checking for file conflicts                  [######################] 100%\n");
+    print_fn("(1/1) checking available disk space                [######################] 100%\n");
+    print_fn(":: Processing package changes...\n");
     print_fn("(1/1) installing ");
     print_fn(pkg_name);
-    print_fn("                               [######################] 100%
-");
-    print_fn(":: Running post-transaction hooks...
-");
-    print_fn("(1/1) Arming ConditionNeedsUpdate...
-");
+    print_fn("                               [######################] 100%\n");
 
-    let nb = pkg_name.as_bytes();
-    let nl = nb.len().min(50);
-    let mut usr_buf = [0u8; 64];
-    usr_buf[..9].copy_from_slice(b"/usr/bin/");
-    usr_buf[9..9+nl].copy_from_slice(&nb[..nl]);
-    if let Ok(p) = core::str::from_utf8(&usr_buf[..9+nl]) {
-        copy_elf_binary("/bin/himada-sh", p);
+    let mut ok = extract_tar_archive(clean);
+    if !ok {
+        let nb = pkg_name.as_bytes();
+        let nl = nb.len().min(50);
+        let mut usr_buf = [0u8; 64];
+        usr_buf[..9].copy_from_slice(b"/usr/bin/");
+        usr_buf[9..9+nl].copy_from_slice(&nb[..nl]);
+        if let Ok(p) = core::str::from_utf8(&usr_buf[..9+nl]) {
+            ok = copy_package_file(clean, p);
+        }
     }
+
+    if !ok {
+        print_fn("error: failed to commit transaction (failed to extract or install package)\n");
+        return;
+    }
+
+    print_fn(":: Running post-transaction hooks...\n");
+    print_fn("(1/1) Arming ConditionNeedsUpdate...\n");
 
     unsafe {
         for p in REPO_PACKAGES.iter_mut() {
             if p.name == pkg_name {
                 p.installed = true;
                 break;
+            }
+        }
+        for dp in DYN_PACKAGES.iter_mut() {
+            if dp.valid {
+                let nl = dp.name.iter().position(|&b| b == 0).unwrap_or(dp.name.len());
+                if let Ok(dname) = core::str::from_utf8(&dp.name[..nl]) {
+                    if dname == pkg_name {
+                        dp.installed = true;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1819,7 +1905,7 @@ fn search_files<F: FnMut(&str)>(filename: &str, print_fn: &mut F) {
     }
 }
 
-fn remove_packages<F: FnMut(&str)>(targets: &[&str], print_fn: &mut F) {
+fn remove_packages<F: FnMut(&str)>(targets: &[&str], noconfirm: bool, print_fn: &mut F) {
     unsafe {
         let mut valid_indices: [(usize, bool); 16] = [(0, false); 16];
         let mut valid_count: u8 = 0;
@@ -1910,7 +1996,15 @@ fn remove_packages<F: FnMut(&str)>(targets: &[&str], print_fn: &mut F) {
         print_u64(print_fn, (total_rm_kib / 512).max(1) as u64);
         print_fn(" MiB\n\n");
 
-        print_fn(":: Do you want to remove these packages? [Y/n] Y\n");
+        if !noconfirm {
+            print_fn(":: Do you want to remove these packages? [Y/n] ");
+            if !prompt_confirm() {
+                print_fn("\nerror: operation aborted\n");
+                return;
+            }
+        } else {
+            print_fn(":: Do you want to remove these packages? [Y/n] Y\n");
+        }
         print_fn(":: Processing package changes...\n");
 
         for i in 0..valid_count as usize {
@@ -1950,6 +2044,11 @@ fn remove_packages<F: FnMut(&str)>(targets: &[&str], print_fn: &mut F) {
             usr_buf[9..9+nl].copy_from_slice(&nb[..nl]);
             if let Ok(path) = core::str::from_utf8(&usr_buf[..9+nl]) {
                 remove_disk_file(path);
+            }
+
+            if pname == "ripgrep" {
+                remove_disk_file("/bin/rg");
+                remove_disk_file("/usr/bin/rg");
             }
 
             let mut db_dir = [0u8; 96];

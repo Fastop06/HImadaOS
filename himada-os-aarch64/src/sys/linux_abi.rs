@@ -7,12 +7,18 @@ use smoltcp::iface::SocketHandle;
 use crate::hal::device::BlockDevice;
 
 pub const SYS_GETCWD: u64 = 17;
+pub const SYS_EVENTFD2: u64 = 19;
+pub const SYS_EPOLL_CREATE1: u64 = 20;
+pub const SYS_EPOLL_CTL: u64 = 21;
+pub const SYS_EPOLL_PWAIT: u64 = 22;
 pub const SYS_DUP: u64 = 23;
 pub const SYS_DUP3: u64 = 24;
 pub const SYS_FCNTL: u64 = 25;
 pub const SYS_IOCTL: u64 = 29;
 pub const SYS_MKDIRAT: u64 = 34;
 pub const SYS_UNLINKAT: u64 = 35;
+pub const SYS_SYMLINKAT: u64 = 36;
+pub const SYS_UMOUNT2: u64 = 39;
 pub const SYS_MOUNT: u64 = 40;
 pub const SYS_FACCESSAT: u64 = 48;
 pub const SYS_CHDIR: u64 = 49;
@@ -47,7 +53,7 @@ pub const SYS_RT_SIGPROCMASK: u64 = 135;
 pub const SYS_SETGID: u64 = 144;
 pub const SYS_SETUID: u64 = 146;
 pub const SYS_UNAME: u64 = 160;
-pub const SYS_UMOUNT2: u64 = 166;
+pub const SYS_UMASK: u64 = 166;
 pub const SYS_PRCTL: u64 = 167;
 pub const SYS_GETTIMEOFDAY: u64 = 169;
 pub const SYS_GETPID: u64 = 172;
@@ -64,6 +70,7 @@ pub const SYS_ACCEPT: u64 = 202;
 pub const SYS_CONNECT: u64 = 203;
 pub const SYS_BRK: u64 = 214;
 pub const SYS_MUNMAP: u64 = 215;
+pub const SYS_MREMAP: u64 = 216;
 pub const SYS_CLONE: u64 = 220;
 pub const SYS_EXECVE: u64 = 221;
 pub const SYS_MMAP: u64 = 222;
@@ -72,6 +79,7 @@ pub const SYS_MADVISE: u64 = 233;
 pub const SYS_WAIT4: u64 = 260;
 pub const SYS_PRLIMIT64: u64 = 261;
 pub const SYS_GETRANDOM: u64 = 278;
+pub const SYS_EPOLL_PWAIT2: u64 = 281;
 pub const SYS_RSEQ: u64 = 293;
 pub const SYS_GET_FB_INFO: u64 = 1000;
 
@@ -89,6 +97,11 @@ pub fn dispatch_syscall_ctx(context: &mut crate::hal::exceptions::ExceptionConte
     let arg2 = context.x[2];
     match sys_no {
         SYS_GETCWD => sys_getcwd(arg0, arg1),
+        SYS_EVENTFD2 => sys_eventfd2(arg0, arg1),
+        SYS_EPOLL_CREATE1 => sys_epoll_create1(arg0),
+        SYS_EPOLL_CTL => sys_epoll_ctl(arg0, arg1, arg2, context.x[3]),
+        SYS_EPOLL_PWAIT => sys_epoll_pwait(arg0, arg1, arg2, context.x[3] as i64, context.x[4]),
+        SYS_EPOLL_PWAIT2 => sys_epoll_pwait2(arg0, arg1, arg2, context.x[3], context.x[4]),
         SYS_CHDIR => sys_chdir(arg0),
         SYS_DUP => sys_dup(arg0),
         SYS_DUP3 => sys_dup3(arg0, arg1, arg2),
@@ -96,6 +109,7 @@ pub fn dispatch_syscall_ctx(context: &mut crate::hal::exceptions::ExceptionConte
         SYS_IOCTL => sys_ioctl(arg0, arg1, arg2),
         SYS_MKDIRAT => sys_mkdirat(arg0, arg1, arg2),
         SYS_UNLINKAT => sys_unlinkat(arg0, arg1, arg2),
+        SYS_SYMLINKAT => sys_symlinkat(arg0, arg1 as i64, arg2),
         SYS_FCHMODAT => sys_fchmodat(arg0, arg1, arg2),
         SYS_FCHOWNAT => sys_fchownat(arg0, arg1, arg2, context.x[3], context.x[4]),
         SYS_FACCESSAT => sys_faccessat(arg0 as i64, arg1, arg2 as i32, context.x[3] as i32),
@@ -111,7 +125,8 @@ pub fn dispatch_syscall_ctx(context: &mut crate::hal::exceptions::ExceptionConte
         SYS_READLINKAT => sys_readlinkat(arg0 as i64, arg1, arg2, context.x[3]),
         SYS_NEWFSTATAT => sys_newfstatat(arg0 as i64, arg1, arg2, context.x[3]),
         SYS_FSTAT => sys_fstat(arg0, arg1),
-        SYS_EXIT | SYS_EXIT_GROUP => sys_exit(arg0),
+        SYS_EXIT => sys_exit(arg0),
+        SYS_EXIT_GROUP => sys_exit_group(arg0),
         SYS_SET_TID_ADDRESS => sys_set_tid_address(arg0),
         SYS_FUTEX => crate::sys::futex::sys_futex(arg0, arg1 as i32, arg2 as u32, context.x[3], context.x[4], context.x[5] as u32),
         SYS_SET_ROBUST_LIST => 0,
@@ -121,6 +136,8 @@ pub fn dispatch_syscall_ctx(context: &mut crate::hal::exceptions::ExceptionConte
             crate::sys::process::schedule();
             0
         },
+        122 => 0, // SYS_SCHED_SETAFFINITY
+        123 => sys_sched_getaffinity(arg0, arg1, arg2),
         SYS_KILL => sys_kill(arg0 as i64, arg1 as i32),
         SYS_TKILL | SYS_TGKILL => 0,
         SYS_SIGALTSTACK => 0,
@@ -131,6 +148,7 @@ pub fn dispatch_syscall_ctx(context: &mut crate::hal::exceptions::ExceptionConte
         SYS_UNAME => sys_uname(arg0),
         SYS_MOUNT => sys_mount(arg0, arg1, arg2, context.x[3], context.x[4]),
         SYS_UMOUNT2 => sys_umount2(arg0, arg1 as i32),
+        SYS_UMASK => sys_umask(arg0),
         SYS_PRCTL => 0,
         SYS_GETTIMEOFDAY => sys_gettimeofday(arg0, arg1),
         SYS_GETPID => sys_getpid(),
@@ -139,12 +157,14 @@ pub fn dispatch_syscall_ctx(context: &mut crate::hal::exceptions::ExceptionConte
         SYS_GETGID | SYS_GETEGID => sys_getgid(),
         SYS_GETTID => sys_gettid(),
         SYS_SOCKET => sys_socket(arg0, arg1, arg2),
+        199 => sys_socketpair(arg0, arg1, arg2, context.x[3]),
         SYS_BIND => sys_bind(arg0, arg1, arg2),
         SYS_LISTEN => sys_listen(arg0, arg1),
         SYS_ACCEPT => sys_accept(arg0, arg1, arg2),
         SYS_CONNECT => sys_connect(arg0, arg1, arg2),
         SYS_BRK => sys_brk(arg0),
         SYS_MUNMAP => 0,
+        SYS_MREMAP => sys_mremap(arg0, arg1, arg2, context.x[3], context.x[4]),
         SYS_CLONE => sys_clone_ctx(arg0, arg1, arg2, context.x[3], context.x[4], context),
         SYS_EXECVE => sys_execve_ctx(arg0, arg1, arg2, context),
         SYS_MMAP => sys_mmap(arg0, arg1, arg2, context.x[3], context.x[4], context.x[5]),
@@ -155,13 +175,26 @@ pub fn dispatch_syscall_ctx(context: &mut crate::hal::exceptions::ExceptionConte
         SYS_GETRANDOM => sys_getrandom(arg0, arg1, arg2),
         52 | 53 => 0, // sys_fchmod / sys_fchmodat (success)
         SYS_RSEQ => (-38i64) as u64, // -ENOSYS
+        291 => sys_statx(arg0 as i64, arg1, arg2 as i32, context.x[3] as u32, context.x[4]),
+        435 => (-38i64) as u64, // SYS_CLONE3 -> -ENOSYS
         SYS_GET_FB_INFO => sys_get_fb_info(arg0),
         81 | 162 => sys_sync(),
         _ => {
             serial_println!("[Syscall] Unimplemented syscall: {}", sys_no);
-            !0 // -ENOSYS
+            (-38i64) as u64 // -ENOSYS
         }
     }
+}
+
+fn sys_sched_getaffinity(_pid: u64, len: u64, mask_ptr: u64) -> u64 {
+    if mask_ptr == 0 { return (-14i64) as u64; } // -EFAULT
+    if len < 8 { return (-22i64) as u64; } // -EINVAL
+    let copy_bytes = (len as usize).min(128);
+    unsafe {
+        core::ptr::write_bytes(mask_ptr as *mut u8, 0, copy_bytes);
+        *(mask_ptr as *mut u64) = 1; // Bit 0 = CPU 0
+    }
+    copy_bytes as u64
 }
 
 pub fn dispatch_syscall(sys_no: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
@@ -183,11 +216,16 @@ pub struct FileDescriptor {
     pub node: Arc<VfsNode>,
     pub offset: usize,
     pub pty_session: Option<Arc<crate::fs::pty::PtySession>>,
+    pub path: alloc::string::String,
 }
 
 impl FileDescriptor {
     pub fn new(node: Arc<VfsNode>, offset: usize) -> Self {
-        Self { node, offset, pty_session: None }
+        Self { node, offset, pty_session: None, path: alloc::string::String::new() }
+    }
+
+    pub fn with_path(node: Arc<VfsNode>, offset: usize, path: alloc::string::String) -> Self {
+        Self { node, offset, pty_session: None, path }
     }
 }
 
@@ -201,6 +239,16 @@ pub static mut FD_TABLE: [Option<FileDescriptor>; 64] = [
     None, None, None, None, None, None, None, None,
     None, None, None, None, None, None, None, None,
 ];
+
+unsafe fn alloc_fd(desc: FileDescriptor) -> Option<usize> {
+    for i in 3..64 {
+        if FD_TABLE[i].is_none() {
+            FD_TABLE[i] = Some(desc);
+            return Some(i);
+        }
+    }
+    None
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -239,7 +287,7 @@ fn sys_ppoll(fds_ptr: u64, nfds: u64, _timeout_ptr: u64, _sigmask_ptr: u64) -> u
     ready
 }
 
-fn sys_openat(_dirfd: u64, pathname: u64, flags: u64) -> u64 {
+fn sys_openat(dirfd: u64, pathname: u64, flags: u64) -> u64 {
     unsafe {
         let mut len = 0;
         let mut ptr = pathname as *const u8;
@@ -250,16 +298,16 @@ fn sys_openat(_dirfd: u64, pathname: u64, flags: u64) -> u64 {
         
         let path_bytes = core::slice::from_raw_parts(pathname as *const u8, len);
         if let Ok(raw_path_str) = core::str::from_utf8(path_bytes) {
-            let (euid, egid, proc_cwd) = {
+            let (euid, egid) = {
                 let pm = crate::sys::process::PROCESS_MANAGER.lock();
                 let cur_pid = pm.current_pid;
                 if let Some(p) = pm.procs.iter().flatten().find(|p| p.pid == cur_pid) {
-                    (p.euid, p.egid, p.cwd.clone())
+                    (p.euid, p.egid)
                 } else {
-                    (0, 0, alloc::string::String::from("/"))
+                    (0, 0)
                 }
             };
-            let path_resolved = resolve_path_relative(&proc_cwd, raw_path_str);
+            let path_resolved = resolve_at_path(dirfd as i64, raw_path_str);
             let path_str = &path_resolved;
             let clean = path_str.trim_start_matches('/');
             if clean == "dev/null" || clean == "dev/zero" || clean == "dev/urandom" {
@@ -278,7 +326,7 @@ fn sys_openat(_dirfd: u64, pathname: u64, flags: u64) -> u64 {
                 });
                 for i in 3..64 {
                     if FD_TABLE[i].is_none() {
-                        FD_TABLE[i] = Some(FileDescriptor::new(dev_node, 0));
+                        FD_TABLE[i] = Some(FileDescriptor::with_path(dev_node, 0, path_resolved));
                         return i as u64;
                     }
                 }
@@ -293,6 +341,7 @@ fn sys_openat(_dirfd: u64, pathname: u64, flags: u64) -> u64 {
                                 node: master_node,
                                 offset: 0,
                                 pty_session: Some(session),
+                                path: alloc::string::String::from("/dev/ptmx"),
                             });
                             return i as u64;
                         }
@@ -315,6 +364,7 @@ fn sys_openat(_dirfd: u64, pathname: u64, flags: u64) -> u64 {
                                         node,
                                         offset: 0,
                                         pty_session: Some(session),
+                                        path: path_resolved,
                                     });
                                     return i as u64;
                                 }
@@ -352,7 +402,7 @@ fn sys_openat(_dirfd: u64, pathname: u64, flags: u64) -> u64 {
                     return (-13i64) as u64; // -EACCES
                 }
                 n
-            } else if (flags & 64) != 0 || (flags & 1) != 0 || (flags & 2) != 0 {
+            } else if (flags & 64) != 0 {
                 let clean = path_str.trim_start_matches('/');
                 let mounts = crate::fs::vfs::MOUNT_POINTS.read();
                 let mut ext4_node = None;
@@ -400,7 +450,7 @@ fn sys_openat(_dirfd: u64, pathname: u64, flags: u64) -> u64 {
 
             for i in 3..64 {
                 if FD_TABLE[i].is_none() {
-                    FD_TABLE[i] = Some(FileDescriptor::new(node, 0));
+                    FD_TABLE[i] = Some(FileDescriptor::with_path(node, 0, path_resolved));
                     return i as u64;
                 }
             }
@@ -445,6 +495,19 @@ fn sys_read(fd: u64, buf: u64, count: u64) -> u64 {
 }
 
 unsafe fn read_from_desc(desc: &mut FileDescriptor, buf: u64, count: u64) -> u64 {
+    if let NodeKind::EventFd(ref lock) = desc.node.kind {
+        if count < 8 || buf == 0 { return (-22i64) as u64; /* -EINVAL */ }
+        let mut state = lock.lock();
+        let val = if state.counter > 0 {
+            let v = state.counter;
+            state.counter = 0;
+            v
+        } else {
+            0
+        };
+        *(buf as *mut u64) = val;
+        return 8;
+    }
     if let NodeKind::Pipe(ref ring_lock) = desc.node.kind {
         let buf_slice = core::slice::from_raw_parts_mut(buf as *mut u8, count as usize);
         let start = crate::net::socket::now();
@@ -578,7 +641,7 @@ unsafe fn read_from_desc(desc: &mut FileDescriptor, buf: u64, count: u64) -> u64
 }
 
 fn sys_close(fd: u64) -> u64 {
-    if fd >= 64 { return !0; }
+    if fd >= 64 { return (-9i64) as u64; }
     unsafe {
         if let Some(desc) = FD_TABLE[fd as usize].take() {
             if let NodeKind::Pipe(ref ring_lock) = desc.node.kind {
@@ -657,41 +720,68 @@ fn sys_close(fd: u64) -> u64 {
             }
             return 0;
         }
+        if fd <= 2 {
+            return 0;
+        }
     }
-    !0
+    (-9i64) as u64
 }
 
-fn sys_fstat(fd: u64, statbuf: u64) -> u64 {
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LinuxStat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub __pad1: u64,
+    pub st_size: i64,
+    pub st_blksize: i32,
+    pub __pad2: i32,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_atime_nsec: u64,
+    pub st_mtime: i64,
+    pub st_mtime_nsec: u64,
+    pub st_ctime: i64,
+    pub st_ctime_nsec: u64,
+    pub __unused4: u32,
+    pub __unused5: u32,
+}
+
+pub fn sys_fstat(fd: u64, statbuf: u64) -> u64 {
     if statbuf == 0 { return !0; }
-    #[repr(C)]
-    struct Stat {
-        st_dev: u64, st_ino: u64, st_mode: u32, st_nlink: u32,
-        st_uid: u32, st_gid: u32, st_rdev: u64, __pad1: u64,
-        st_size: i64, st_blksize: i32, __pad2: i32,
-        st_blocks: i64,
-    }
     if fd < 3 {
         unsafe {
-            core::ptr::write_bytes(statbuf as *mut u8, 0, core::mem::size_of::<Stat>());
-            let stat = &mut *(statbuf as *mut Stat);
+            core::ptr::write_bytes(statbuf as *mut u8, 0, core::mem::size_of::<LinuxStat>());
+            let stat = &mut *(statbuf as *mut LinuxStat);
             stat.st_mode = 0o020666; // S_IFCHR | 0666
             stat.st_rdev = 0x0501;   // /dev/tty
             stat.st_nlink = 1;
             stat.st_blksize = 1024;
+            stat.st_atime = 1700000000;
+            stat.st_mtime = 1700000000;
+            stat.st_ctime = 1700000000;
         }
         return 0;
     }
     if fd >= 64 { return !0; }
     unsafe {
         if let Some(ref desc) = FD_TABLE[fd as usize] {
-            core::ptr::write_bytes(statbuf as *mut u8, 0, core::mem::size_of::<Stat>());
-            let stat = &mut *(statbuf as *mut Stat);
+            core::ptr::write_bytes(statbuf as *mut u8, 0, core::mem::size_of::<LinuxStat>());
+            let stat = &mut *(statbuf as *mut LinuxStat);
             stat.st_dev = 0x801;
             stat.st_ino = (alloc::sync::Arc::as_ptr(&desc.node) as u64) | 1;
             stat.st_nlink = 1;
             stat.st_size = desc.node.size as i64;
             stat.st_blksize = 4096;
             stat.st_blocks = (desc.node.size as i64 + 511) / 512;
+            stat.st_atime = 1700000000;
+            stat.st_mtime = 1700000000;
+            stat.st_ctime = 1700000000;
             match desc.node.kind {
                 NodeKind::File => stat.st_mode = 0o100777,
                 NodeKind::Directory => stat.st_mode = 0o040777,
@@ -699,6 +789,8 @@ fn sys_fstat(fd: u64, statbuf: u64) -> u64 {
                 NodeKind::BlockDevice(_) => stat.st_mode = 0o060660,
                 NodeKind::Socket(_) | NodeKind::UdpSocket(_, _) => stat.st_mode = 0o140777,
                 NodeKind::Pipe(_) => stat.st_mode = 0o010600,
+                NodeKind::SymLink(_) => stat.st_mode = 0o120777,
+                NodeKind::EventFd(_) | NodeKind::Epoll(_) => stat.st_mode = 0o100600,
             }
             return 0;
         }
@@ -737,6 +829,13 @@ fn sys_write(fd: u64, buf: u64, count: u64) -> u64 {
 }
 
 unsafe fn write_to_desc(desc: &mut FileDescriptor, buf: u64, count: u64) -> u64 {
+    if let NodeKind::EventFd(ref lock) = desc.node.kind {
+        if count < 8 || buf == 0 { return (-22i64) as u64; /* -EINVAL */ }
+        let val = unsafe { *(buf as *const u64) };
+        let mut state = lock.lock();
+        state.counter = state.counter.saturating_add(val);
+        return 8;
+    }
     let buf_slice = core::slice::from_raw_parts(buf as *const u8, count as usize);
     if matches!(desc.node.kind, NodeKind::CharDevice) {
         if desc.node.name == "null" || desc.node.name == "zero" {
@@ -847,6 +946,52 @@ pub fn sys_pipe2(pipefd: u64, _flags: u64) -> u64 {
         let fds_ptr = pipefd as *mut i32;
         *fds_ptr.add(0) = r as i32;
         *fds_ptr.add(1) = w as i32;
+        0
+    }
+}
+
+pub fn sys_socketpair(_domain: u64, _type: u64, _protocol: u64, sv_ptr: u64) -> u64 {
+    if sv_ptr == 0 { return (-14i64) as u64; } // -EFAULT
+    unsafe {
+        let mut fd1 = None;
+        let mut fd2 = None;
+        for i in 3..64 {
+            if FD_TABLE[i].is_none() {
+                if fd1.is_none() {
+                    fd1 = Some(i);
+                } else if fd2.is_none() {
+                    fd2 = Some(i);
+                    break;
+                }
+            }
+        }
+        let (s1, s2) = match (fd1, fd2) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return (-24i64) as u64, // -EMFILE
+        };
+
+        let mut ring = crate::fs::vfs::PipeRingBuffer::new();
+        ring.readers = 2;
+        ring.writers = 2;
+        let ring_arc = alloc::sync::Arc::new(spin::Mutex::new(ring));
+
+        let node1 = alloc::sync::Arc::new(VfsNode::new(
+            alloc::string::String::from("sock_pair0"),
+            NodeKind::Pipe(ring_arc.clone()),
+            0, 0, 0o600
+        ));
+        let node2 = alloc::sync::Arc::new(VfsNode::new(
+            alloc::string::String::from("sock_pair1"),
+            NodeKind::Pipe(ring_arc.clone()),
+            0, 0, 0o600
+        ));
+
+        FD_TABLE[s1] = Some(FileDescriptor::new(node1, 0));
+        FD_TABLE[s2] = Some(FileDescriptor::new(node2, 0));
+
+        let fds_ptr = sv_ptr as *mut i32;
+        *fds_ptr.add(0) = s1 as i32;
+        *fds_ptr.add(1) = s2 as i32;
         0
     }
 }
@@ -1160,6 +1305,32 @@ pub fn resolve_path_relative(cwd: &str, path: &str) -> alloc::string::String {
     }
 }
 
+pub fn resolve_at_path(dirfd: i64, path: &str) -> alloc::string::String {
+    let path = path.trim();
+    if path.starts_with('/') {
+        return resolve_path_relative("/", path);
+    }
+    if dirfd >= 0 && (dirfd as usize) < 64 {
+        unsafe {
+            if let Some(ref desc) = FD_TABLE[dirfd as usize] {
+                if !desc.path.is_empty() {
+                    return resolve_path_relative(&desc.path, path);
+                }
+            }
+        }
+    }
+    let proc_cwd = {
+        let pm = crate::sys::process::PROCESS_MANAGER.lock();
+        let cur_pid = pm.current_pid;
+        if let Some(p) = pm.procs.iter().flatten().find(|p| p.pid == cur_pid) {
+            p.cwd.clone()
+        } else {
+            alloc::string::String::from("/")
+        }
+    };
+    resolve_path_relative(&proc_cwd, path)
+}
+
 fn sys_chdir(pathname: u64) -> u64 {
     if pathname == 0 { return (-14i64) as u64; } // -EFAULT
     unsafe {
@@ -1274,7 +1445,16 @@ fn sys_readlinkat(_dirfd: i64, pathname_ptr: u64, buf_ptr: u64, bufsiz: u64) -> 
         drop(pm);
         name
     } else {
-        return (-22i64) as u64; // -EINVAL: not a symbolic link
+        let full_path = resolve_at_path(_dirfd, path_str);
+        if let Some(node) = crate::fs::vfs::lookup_no_follow(&full_path) {
+            if let NodeKind::SymLink(ref target) = node.kind {
+                target.clone()
+            } else {
+                return (-22i64) as u64; // -EINVAL: not a symbolic link
+            }
+        } else {
+            return (-2i64) as u64; // -ENOENT
+        }
     };
 
     let tb = target.as_bytes();
@@ -1305,16 +1485,7 @@ fn sys_newfstatat(dirfd: i64, pathname_ptr: u64, statbuf: u64, _flags: u64) -> u
         return sys_fstat(dirfd as u64, statbuf);
     }
     
-    let proc_cwd = {
-        let pm = crate::sys::process::PROCESS_MANAGER.lock();
-        let cur_pid = pm.current_pid;
-        if let Some(p) = pm.procs.iter().flatten().find(|p| p.pid == cur_pid) {
-            p.cwd.clone()
-        } else {
-            alloc::string::String::from("/")
-        }
-    };
-    let resolved = resolve_path_relative(&proc_cwd, path_str);
+    let resolved = resolve_at_path(dirfd, path_str);
 
     let node_opt = crate::fs::vfs::lookup(&resolved).or_else(|| {
         if resolved.starts_with("/lib/") {
@@ -1329,22 +1500,18 @@ fn sys_newfstatat(dirfd: i64, pathname_ptr: u64, statbuf: u64, _flags: u64) -> u
     });
 
     if let Some(node) = node_opt {
-        #[repr(C)]
-        struct Stat {
-            st_dev: u64, st_ino: u64, st_mode: u32, st_nlink: u32,
-            st_uid: u32, st_gid: u32, st_rdev: u64, __pad1: u64,
-            st_size: i64, st_blksize: i32, __pad2: i32,
-            st_blocks: i64,
-        }
         unsafe {
-            core::ptr::write_bytes(statbuf as *mut u8, 0, core::mem::size_of::<Stat>());
-            let stat = &mut *(statbuf as *mut Stat);
+            core::ptr::write_bytes(statbuf as *mut u8, 0, core::mem::size_of::<LinuxStat>());
+            let stat = &mut *(statbuf as *mut LinuxStat);
             stat.st_dev = 0x801;
             stat.st_ino = (alloc::sync::Arc::as_ptr(&node) as u64) | 1;
             stat.st_nlink = 1;
             stat.st_size = node.size as i64;
             stat.st_blksize = 4096;
             stat.st_blocks = (node.size as i64 + 511) / 512;
+            stat.st_atime = 1700000000;
+            stat.st_mtime = 1700000000;
+            stat.st_ctime = 1700000000;
             match node.kind {
                 NodeKind::File => stat.st_mode = 0o100777,
                 NodeKind::Directory => stat.st_mode = 0o040777,
@@ -1352,6 +1519,8 @@ fn sys_newfstatat(dirfd: i64, pathname_ptr: u64, statbuf: u64, _flags: u64) -> u
                 NodeKind::BlockDevice(_) => stat.st_mode = 0o060660,
                 NodeKind::Socket(_) | NodeKind::UdpSocket(_, _) => stat.st_mode = 0o140777,
                 NodeKind::Pipe(_) => stat.st_mode = 0o010600,
+                NodeKind::SymLink(_) => stat.st_mode = 0o120777,
+                NodeKind::EventFd(_) | NodeKind::Epoll(_) => stat.st_mode = 0o100600,
             }
         }
         0
@@ -1360,7 +1529,104 @@ fn sys_newfstatat(dirfd: i64, pathname_ptr: u64, statbuf: u64, _flags: u64) -> u
     }
 }
 
-fn sys_faccessat(_dirfd: i64, pathname_ptr: u64, mode: i32, _flags: i32) -> u64 {
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct StatxTimestamp {
+    pub tv_sec: i64,
+    pub tv_nsec: u32,
+    pub __statx_pad1: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LinuxStatx {
+    pub stx_mask: u32,
+    pub stx_blksize: u32,
+    pub stx_attributes: u64,
+    pub stx_nlink: u32,
+    pub stx_uid: u32,
+    pub stx_gid: u32,
+    pub stx_mode: u16,
+    pub __spare0: [u16; 1],
+    pub stx_ino: u64,
+    pub stx_size: u64,
+    pub stx_blocks: u64,
+    pub stx_attributes_mask: u64,
+    pub stx_atime: StatxTimestamp,
+    pub stx_btime: StatxTimestamp,
+    pub stx_ctime: StatxTimestamp,
+    pub stx_mtime: StatxTimestamp,
+    pub stx_rdev_major: u32,
+    pub stx_rdev_minor: u32,
+    pub stx_dev_major: u32,
+    pub stx_dev_minor: u32,
+    pub stx_mnt_id: u64,
+    pub stx_dio_mem_align: u32,
+    pub stx_dio_offset_align: u32,
+    pub __spare2: [u64; 12],
+}
+
+pub fn sys_statx(dirfd: i64, pathname_ptr: u64, _flags: i32, _mask: u32, statxbuf: u64) -> u64 {
+    if statxbuf == 0 { return (-14i64) as u64; } // -EFAULT
+    if pathname_ptr == 0 {
+        return (-14i64) as u64;
+    }
+    let mut len = 0;
+    let mut ptr = pathname_ptr as *const u8;
+    while unsafe { *ptr } != 0 {
+        len += 1;
+        ptr = unsafe { ptr.add(1) };
+    }
+    let path_slice = unsafe { core::slice::from_raw_parts(pathname_ptr as *const u8, len) };
+    let path_str = match core::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return (-14i64) as u64,
+    };
+    let resolved = resolve_at_path(dirfd, path_str);
+    let node_opt = crate::fs::vfs::lookup(&resolved).or_else(|| {
+        if resolved.starts_with("/lib/") {
+            let mut p = alloc::string::String::from("/usr");
+            p.push_str(&resolved);
+            crate::fs::vfs::lookup(&p)
+        } else if resolved.starts_with("/usr/lib/") {
+            crate::fs::vfs::lookup(&resolved[4..])
+        } else {
+            None
+        }
+    });
+
+    if let Some(node) = node_opt {
+        unsafe {
+            core::ptr::write_bytes(statxbuf as *mut u8, 0, core::mem::size_of::<LinuxStatx>());
+            let sx = &mut *(statxbuf as *mut LinuxStatx);
+            sx.stx_mask = 0x7FF; // STATX_BASIC_STATS
+            sx.stx_blksize = 4096;
+            sx.stx_nlink = 1;
+            sx.stx_ino = (alloc::sync::Arc::as_ptr(&node) as u64) | 1;
+            sx.stx_size = node.size as u64;
+            sx.stx_blocks = (node.size as u64 + 511) / 512;
+            sx.stx_atime.tv_sec = 1700000000;
+            sx.stx_mtime.tv_sec = 1700000000;
+            sx.stx_ctime.tv_sec = 1700000000;
+            sx.stx_btime.tv_sec = 1700000000;
+            match node.kind {
+                NodeKind::File => sx.stx_mode = 0o100777,
+                NodeKind::Directory => sx.stx_mode = 0o040777,
+                NodeKind::CharDevice => sx.stx_mode = 0o020777,
+                NodeKind::BlockDevice(_) => sx.stx_mode = 0o060660,
+                NodeKind::Socket(_) | NodeKind::UdpSocket(_, _) => sx.stx_mode = 0o140777,
+                NodeKind::Pipe(_) => sx.stx_mode = 0o010600,
+                NodeKind::SymLink(_) => sx.stx_mode = 0o120777,
+                NodeKind::EventFd(_) | NodeKind::Epoll(_) => sx.stx_mode = 0o100600,
+            }
+        }
+        0
+    } else {
+        (-2i64) as u64 // -ENOENT
+    }
+}
+
+fn sys_faccessat(dirfd: i64, pathname_ptr: u64, mode: i32, _flags: i32) -> u64 {
     if pathname_ptr == 0 {
         return (-14i64) as u64; // -EFAULT
     }
@@ -1379,16 +1645,7 @@ fn sys_faccessat(_dirfd: i64, pathname_ptr: u64, mode: i32, _flags: i32) -> u64 
         return (-2i64) as u64; // -ENOENT
     }
 
-    let proc_cwd = {
-        let pm = crate::sys::process::PROCESS_MANAGER.lock();
-        let cur_pid = pm.current_pid;
-        if let Some(p) = pm.procs.iter().flatten().find(|p| p.pid == cur_pid) {
-            p.cwd.clone()
-        } else {
-            alloc::string::String::from("/")
-        }
-    };
-    let resolved = resolve_path_relative(&proc_cwd, path_str);
+    let resolved = resolve_at_path(dirfd, path_str);
 
     let node_opt = crate::fs::vfs::lookup(&resolved).or_else(|| {
         if resolved.starts_with("/lib/") {
@@ -1428,11 +1685,14 @@ fn sys_faccessat(_dirfd: i64, pathname_ptr: u64, mode: i32, _flags: i32) -> u64 
 }
 
 fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
-    if req_ptr == 0 { return !0; }
+    if req_ptr == 0 { return (-14i64) as u64; /* -EFAULT */ }
     let (sec, nsec) = unsafe {
         let p = req_ptr as *const u64;
         (*p.add(0), *p.add(1))
     };
+    if nsec >= 1_000_000_000 || sec > 86400 {
+        return (-22i64) as u64; /* -EINVAL */
+    }
     let mut freq: u64 = 0;
     unsafe {
         core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) freq);
@@ -1444,6 +1704,7 @@ fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
         let mut now = start;
         while now.saturating_sub(start) < total_ticks {
             crate::net::socket::poll();
+            crate::sys::process::schedule();
             core::hint::spin_loop();
             unsafe { core::arch::asm!("mrs {0}, cntvct_el0", out(reg) now); }
         }
@@ -1654,20 +1915,55 @@ pub fn sys_fchownat(_dirfd: u64, pathname: u64, owner: u64, group: u64, _flags: 
     !0
 }
 
+pub fn sys_exit_group(code: u64) -> u64 {
+    let cpu = crate::hal::smp::current_cpu_id();
+    let mut pm = crate::sys::process::PROCESS_MANAGER.lock();
+    let cur = pm.current_pids[cpu];
+    let cur_pid = if cur != 0 { cur } else { pm.current_pid };
+    let cur_tgid = pm.get_process_mut(cur_pid).map(|p| p.tgid).unwrap_or(cur_pid);
+    let cur_ttbr0 = pm.get_process_mut(cur_pid).map(|p| p.ttbr0).unwrap_or(0);
+
+    for i in 0..crate::sys::process::MAX_PROCS {
+        if let Some(ref mut proc) = pm.procs[i] {
+            if proc.tgid == cur_tgid || (cur_ttbr0 != 0 && proc.ttbr0 == cur_ttbr0) {
+                proc.state = crate::sys::process::ProcessState::Zombie;
+                proc.exit_code = code as i32;
+                proc.running_cpu = None;
+                let clear_tid = proc.clear_child_tid;
+                if clear_tid != 0 {
+                    unsafe {
+                        *(clear_tid as *mut i32) = 0;
+                    }
+                    crate::sys::futex::futex_wake(clear_tid, 1, 0xFFFF_FFFF);
+                }
+            }
+        }
+    }
+    drop(pm);
+    crate::serial_println!("[Process/Thread] TGID {} exited with code {}", cur_tgid, code);
+    crate::sys::process::schedule();
+    loop {
+        unsafe { core::arch::asm!("wfe"); }
+    }
+}
+
 pub fn sys_exit(code: u64) -> u64 {
     let cpu = crate::hal::smp::current_cpu_id();
     let mut pm = crate::sys::process::PROCESS_MANAGER.lock();
     let cur = pm.current_pids[cpu];
     let cur_pid = if cur != 0 { cur } else { pm.current_pid };
 
-    let mut is_thread = false;
-    let mut clear_tid = 0u64;
+    let is_thread = pm.get_process_mut(cur_pid).map(|p| p.is_thread).unwrap_or(false);
+    if !is_thread {
+        drop(pm);
+        return sys_exit_group(code);
+    }
 
+    let mut clear_tid = 0u64;
     if let Some(proc) = pm.get_process_mut(cur_pid) {
         proc.state = crate::sys::process::ProcessState::Zombie;
         proc.exit_code = code as i32;
         proc.running_cpu = None;
-        is_thread = proc.is_thread;
         clear_tid = proc.clear_child_tid;
         crate::serial_println!("[Process/Thread] TID {} exited with code {}", cur_pid, code);
     }
@@ -1712,9 +2008,48 @@ pub fn sys_wait4(pid: i64, status_ptr: u64, _options: u64) -> u64 {
         if let Some(idx) = zombie_idx {
             let zombie = pm.procs[idx].take().unwrap();
             let zpid = zombie.pid;
+            let z_tgid = zombie.tgid;
             let status = (zombie.exit_code & 0xFF) << 8;
+            let z_ttbr0 = zombie.ttbr0;
+            let z_kstack = zombie.kstack;
+            let is_thread = zombie.is_thread;
+
+            if !is_thread {
+                for i in 0..crate::sys::process::MAX_PROCS {
+                    let should_clean = if let Some(ref p) = pm.procs[i] {
+                        p.pid != zpid && (p.tgid == z_tgid || (z_ttbr0 != 0 && p.ttbr0 == z_ttbr0))
+                    } else {
+                        false
+                    };
+                    if should_clean {
+                        let thread_proc = pm.procs[i].take().unwrap();
+                        let th_kstack = thread_proc.kstack;
+                        if th_kstack != 0 {
+                            let kstack_phys = unsafe { crate::mm::vmm::virt_to_phys(th_kstack) };
+                            if kstack_phys != 0 {
+                                let kstack_pages = crate::sys::process::KSTACK_SIZE / 4096;
+                                crate::mm::pmm::free_frames(kstack_phys, kstack_pages);
+                            }
+                        }
+                    }
+                }
+            }
+
             drop(pm);
             crate::serial_println!("[Wait4] Reaped child PID {}", zpid);
+
+            if !is_thread && z_ttbr0 != 0 {
+                unsafe {
+                    crate::mm::vmm::destroy_user_address_space(z_ttbr0);
+                }
+            }
+            if z_kstack != 0 {
+                let kstack_phys = unsafe { crate::mm::vmm::virt_to_phys(z_kstack) };
+                if kstack_phys != 0 {
+                    let kstack_pages = crate::sys::process::KSTACK_SIZE / 4096;
+                    crate::mm::pmm::free_frames(kstack_phys, kstack_pages);
+                }
+            }
 
             if status_ptr != 0 {
                 unsafe {
@@ -1966,10 +2301,12 @@ pub fn sys_execve_ctx(filename_ptr: u64, argv_ptr: u64, envp_ptr: u64, context: 
         ptr = unsafe { ptr.add(1) };
     }
     let path_slice = unsafe { core::slice::from_raw_parts(filename_ptr as *const u8, len) };
-    let path_str = match core::str::from_utf8(path_slice) {
+    let path_str_raw = match core::str::from_utf8(path_slice) {
         Ok(s) => s,
         Err(_) => return !0,
     };
+    let path_string = alloc::string::String::from(path_str_raw);
+    let path_str = path_string.as_str();
 
     let node = match crate::fs::vfs::lookup(path_str) {
         Some(n) => n,
@@ -2031,6 +2368,9 @@ pub fn sys_execve_ctx(filename_ptr: u64, argv_ptr: u64, envp_ptr: u64, context: 
     }
 
     let new_ttbr0 = crate::mm::vmm::create_user_address_space();
+    unsafe {
+        MMAP_NEXT = 0x4000_0000_0000;
+    }
     let (entry, sp) = if let Some(data) = node.static_data {
         if data.len() < 4 || &data[0..4] != b"\x7fELF" {
             crate::serial_println!("[Execve FAIL] Not a valid ELF binary");
@@ -2058,19 +2398,24 @@ pub fn sys_execve_ctx(filename_ptr: u64, argv_ptr: u64, envp_ptr: u64, context: 
         }
     };
 
-    let mut pm = crate::sys::process::PROCESS_MANAGER.lock();
-    if let Some(proc) = pm.get_current_mut() {
-        proc.ttbr0 = new_ttbr0;
-        proc.entry_point = entry;
-        proc.ustack_top = sp;
-        
-        let mut name = [0u8; 32];
-        let pb = path_str.as_bytes();
-        let cp = pb.len().min(31);
-        name[..cp].copy_from_slice(&pb[..cp]);
-        proc.name = name;
-    }
-    drop(pm);
+    let old_ttbr0 = {
+        let mut pm = crate::sys::process::PROCESS_MANAGER.lock();
+        if let Some(proc) = pm.get_current_mut() {
+            let old = proc.ttbr0;
+            proc.ttbr0 = new_ttbr0;
+            proc.entry_point = entry;
+            proc.ustack_top = sp;
+            
+            let mut name = [0u8; 32];
+            let pb = path_str.as_bytes();
+            let cp = pb.len().min(31);
+            name[..cp].copy_from_slice(&pb[..cp]);
+            proc.name = name;
+            old
+        } else {
+            0
+        }
+    };
 
     unsafe {
         core::arch::asm!(
@@ -2081,6 +2426,10 @@ pub fn sys_execve_ctx(filename_ptr: u64, argv_ptr: u64, envp_ptr: u64, context: 
             "isb",
             in(reg) new_ttbr0
         );
+
+        if old_ttbr0 != 0 && old_ttbr0 != new_ttbr0 {
+            crate::mm::vmm::destroy_user_address_space(old_ttbr0);
+        }
     }
 
     context.elr = entry as u64;
@@ -2139,6 +2488,12 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) ->
             v as u64
         }
     } else {
+        unsafe {
+            let end = (addr as usize) + (pages * 4096) as usize;
+            if end > MMAP_NEXT {
+                MMAP_NEXT = end;
+            }
+        }
         addr
     };
 
@@ -2636,16 +2991,33 @@ fn sys_getdents64(fd: u64, dirp: u64, count: u64) -> u64 {
                 return !0; // ENOTDIR
             }
             let children = desc.node.children.read();
-            if desc.offset >= children.len() {
+            let total_entries = children.len() + 2; // +2 for . and ..
+            if desc.offset >= total_entries {
                 return 0; // EOF
             }
             let mut out_ptr = dirp as *mut u8;
             let mut bytes_written: u64 = 0;
 
-            for i in desc.offset..children.len() {
-                let child = &children[i];
-                let name_bytes = child.name.as_bytes();
-                // dirent header: d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) = 19 + name + null
+            for i in desc.offset..total_entries {
+                let (name_bytes, d_type, ino): (&[u8], u8, u64) = if i == 0 {
+                    (b".", 4u8, (alloc::sync::Arc::as_ptr(&desc.node) as u64) | 1)
+                } else if i == 1 {
+                    (b"..", 4u8, ((alloc::sync::Arc::as_ptr(&desc.node) as u64) | 1).wrapping_sub(1))
+                } else {
+                    let child = &children[i - 2];
+                    let dt = match child.kind {
+                        NodeKind::Directory => 4u8,
+                        NodeKind::File => 8u8,
+                        NodeKind::CharDevice => 2u8,
+                        NodeKind::BlockDevice(_) => 6u8,
+                        NodeKind::Socket(_) | NodeKind::UdpSocket(_, _) => 12u8,
+                        NodeKind::Pipe(_) => 1u8,
+                        NodeKind::SymLink(_) => 10u8, // DT_LNK
+                        NodeKind::EventFd(_) | NodeKind::Epoll(_) => 8u8, // DT_REG
+                    };
+                    (child.name.as_bytes(), dt, (alloc::sync::Arc::as_ptr(child) as u64) | 1)
+                };
+
                 let raw_len = 19 + name_bytes.len() + 1;
                 let reclen = ((raw_len + 7) / 8) * 8; // 8-byte aligned
 
@@ -2654,20 +3026,12 @@ fn sys_getdents64(fd: u64, dirp: u64, count: u64) -> u64 {
                 }
 
                 // d_ino
-                core::ptr::write_unaligned(out_ptr as *mut u64, (i + 1) as u64);
+                core::ptr::write_unaligned(out_ptr as *mut u64, ino);
                 // d_off
                 core::ptr::write_unaligned(out_ptr.add(8) as *mut i64, (i + 1) as i64);
                 // d_reclen
                 core::ptr::write_unaligned(out_ptr.add(16) as *mut u16, reclen as u16);
-                // d_type: 4 for DT_DIR, 8 for DT_REG, 2 for DT_CHR
-                let d_type = match child.kind {
-                    NodeKind::Directory => 4u8,
-                    NodeKind::File => 8u8,
-                    NodeKind::CharDevice => 2u8,
-                    NodeKind::BlockDevice(_) => 6u8, // DT_BLK
-                    NodeKind::Socket(_) | NodeKind::UdpSocket(_, _) => 12u8, // DT_SOCK
-                    NodeKind::Pipe(_) => 1u8, // DT_FIFO
-                };
+                // d_type
                 *out_ptr.add(18) = d_type;
                 // d_name
                 core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), out_ptr.add(19), name_bytes.len());
@@ -2683,7 +3047,7 @@ fn sys_getdents64(fd: u64, dirp: u64, count: u64) -> u64 {
     !0
 }
 
-fn sys_mkdirat(_dirfd: u64, pathname: u64, _mode: u64) -> u64 {
+fn sys_mkdirat(dirfd: u64, pathname: u64, _mode: u64) -> u64 {
     if pathname == 0 { return !0; }
     unsafe {
         let mut len = 0;
@@ -2691,16 +3055,16 @@ fn sys_mkdirat(_dirfd: u64, pathname: u64, _mode: u64) -> u64 {
         while *ptr != 0 && len < 256 { len += 1; ptr = ptr.add(1); }
         let slice = core::slice::from_raw_parts(pathname as *const u8, len);
         if let Ok(raw_path) = core::str::from_utf8(slice) {
-            let (euid, egid, proc_cwd) = {
+            let (euid, egid) = {
                 let pm = crate::sys::process::PROCESS_MANAGER.lock();
                 let cur_pid = pm.current_pid;
                 if let Some(p) = pm.procs.iter().flatten().find(|p| p.pid == cur_pid) {
-                    (p.euid, p.egid, p.cwd.clone())
+                    (p.euid, p.egid)
                 } else {
-                    (0, 0, alloc::string::String::from("/"))
+                    (0, 0)
                 }
             };
-            let resolved = resolve_path_relative(&proc_cwd, raw_path);
+            let resolved = resolve_at_path(dirfd as i64, raw_path);
             let parts: alloc::vec::Vec<&str> = resolved.split('/').filter(|s| !s.is_empty()).collect();
             let dname = parts.last().unwrap_or(&"dir");
             let dir_mode = if _mode != 0 { (_mode & 0o777) as u32 } else { 0o755 };
@@ -2723,7 +3087,7 @@ fn sys_mkdirat(_dirfd: u64, pathname: u64, _mode: u64) -> u64 {
     !0
 }
 
-fn sys_unlinkat(_dirfd: u64, pathname: u64, _flags: u64) -> u64 {
+fn sys_unlinkat(dirfd: u64, pathname: u64, _flags: u64) -> u64 {
     if pathname == 0 { return !0; }
     unsafe {
         let mut len = 0;
@@ -2731,16 +3095,7 @@ fn sys_unlinkat(_dirfd: u64, pathname: u64, _flags: u64) -> u64 {
         while *ptr != 0 && len < 256 { len += 1; ptr = ptr.add(1); }
         let slice = core::slice::from_raw_parts(pathname as *const u8, len);
         if let Ok(raw_path) = core::str::from_utf8(slice) {
-            let proc_cwd = {
-                let pm = crate::sys::process::PROCESS_MANAGER.lock();
-                let cur_pid = pm.current_pid;
-                if let Some(p) = pm.procs.iter().flatten().find(|p| p.pid == cur_pid) {
-                    p.cwd.clone()
-                } else {
-                    alloc::string::String::from("/")
-                }
-            };
-            let resolved = resolve_path_relative(&proc_cwd, raw_path);
+            let resolved = resolve_at_path(dirfd as i64, raw_path);
             let parts: alloc::vec::Vec<&str> = resolved.split('/').filter(|s| !s.is_empty()).collect();
             if parts.is_empty() { return !0; }
             let target_name = parts.last().unwrap();
@@ -2768,8 +3123,17 @@ pub fn sys_sync() -> u64 {
     0
 }
 
+static UMASK_VAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0o022);
+
+fn sys_umask(new_mask: u64) -> u64 {
+    let old = UMASK_VAL.swap(new_mask & 0o777, core::sync::atomic::Ordering::Relaxed);
+    old
+}
+
 fn read_cstr(ptr_val: u64) -> Option<alloc::string::String> {
-    if ptr_val == 0 { return None; }
+    if ptr_val < 0x1000 || ptr_val >= 0x0000_8000_0000_0000 {
+        return None;
+    }
     unsafe {
         let mut len = 0;
         let mut ptr = ptr_val as *const u8;
@@ -2887,4 +3251,262 @@ fn sys_umount2(target_ptr: u64, _flags: i32) -> u64 {
         crate::serial_println!("[sys_umount2] Target '{}' not mounted", target);
         !0
     }
+}
+
+fn sys_eventfd2(initval: u64, flags: u64) -> u64 {
+    let node = Arc::new(VfsNode::new(
+        alloc::string::String::from("eventfd"),
+        NodeKind::EventFd(Arc::new(spin::Mutex::new(crate::fs::vfs::EventFdState {
+            counter: initval,
+            flags: flags as u32,
+        }))),
+        0, 0, 0o600
+    ));
+    unsafe {
+        if let Some(fd) = alloc_fd(FileDescriptor::new(node, 0)) {
+            fd as u64
+        } else {
+            (-24i64) as u64 // -EMFILE
+        }
+    }
+}
+
+fn sys_epoll_create1(flags: u64) -> u64 {
+    let node = Arc::new(VfsNode::new(
+        alloc::string::String::from("epoll"),
+        NodeKind::Epoll(Arc::new(spin::Mutex::new(crate::fs::vfs::EpollState {
+            registrations: alloc::vec::Vec::new(),
+            flags: flags as u32,
+        }))),
+        0, 0, 0o600
+    ));
+    unsafe {
+        if let Some(fd) = alloc_fd(FileDescriptor::new(node, 0)) {
+            fd as u64
+        } else {
+            (-24i64) as u64 // -EMFILE
+        }
+    }
+}
+
+fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, event_ptr: u64) -> u64 {
+    if epfd >= 64 || fd >= 64 { return (-9i64) as u64; /* -EBADF */ }
+    unsafe {
+        if let Some(ref desc) = FD_TABLE[epfd as usize] {
+            if let NodeKind::Epoll(ref lock) = desc.node.kind {
+                let mut state = lock.lock();
+                match op {
+                    1 => { // EPOLL_CTL_ADD
+                        if event_ptr == 0 { return (-14i64) as u64; /* -EFAULT */ }
+                        let events = *(event_ptr as *const u32);
+                        let data = *((event_ptr + 8) as *const u64);
+                        if state.registrations.iter().any(|r| r.fd == fd as i32) {
+                            return (-17i64) as u64; // -EEXIST
+                        }
+                        state.registrations.push(crate::fs::vfs::EpollRegistration {
+                            fd: fd as i32,
+                            events,
+                            data,
+                        });
+                        0
+                    }
+                    2 => { // EPOLL_CTL_DEL
+                        if let Some(pos) = state.registrations.iter().position(|r| r.fd == fd as i32) {
+                            state.registrations.remove(pos);
+                            0
+                        } else {
+                            (-2i64) as u64 // -ENOENT
+                        }
+                    }
+                    3 => { // EPOLL_CTL_MOD
+                        if event_ptr == 0 { return (-14i64) as u64; /* -EFAULT */ }
+                        let events = *(event_ptr as *const u32);
+                        let data = *((event_ptr + 8) as *const u64);
+                        if let Some(reg) = state.registrations.iter_mut().find(|r| r.fd == fd as i32) {
+                            reg.events = events;
+                            reg.data = data;
+                            0
+                        } else {
+                            (-2i64) as u64 // -ENOENT
+                        }
+                    }
+                    _ => (-22i64) as u64, // -EINVAL
+                }
+            } else {
+                (-22i64) as u64 // -EINVAL: not an epoll fd
+            }
+        } else {
+            (-9i64) as u64 // -EBADF
+        }
+    }
+}
+
+fn sys_epoll_pwait(epfd: u64, events_ptr: u64, maxevents: u64, timeout: i64, _sigmask_ptr: u64) -> u64 {
+    if epfd >= 64 || maxevents == 0 || events_ptr == 0 { return (-22i64) as u64; }
+    let epoll_lock = unsafe {
+        if let Some(ref desc) = FD_TABLE[epfd as usize] {
+            if let NodeKind::Epoll(ref lock) = desc.node.kind {
+                lock.clone()
+            } else {
+                return (-22i64) as u64;
+            }
+        } else {
+            return (-9i64) as u64;
+        }
+    };
+
+    let start_ms = get_current_time_ms();
+    loop {
+        crate::net::socket::poll();
+        let ready = check_epoll_events(&epoll_lock, events_ptr, maxevents as usize);
+        if ready > 0 || timeout == 0 {
+            return ready as u64;
+        }
+        if timeout > 0 {
+            let elapsed = get_current_time_ms().saturating_sub(start_ms);
+            if elapsed >= timeout as u64 {
+                return 0;
+            }
+        }
+        let req = [0u64, 1_000_000u64]; // 1ms
+        sys_nanosleep(req.as_ptr() as u64, 0);
+        crate::sys::process::schedule();
+    }
+}
+
+fn sys_epoll_pwait2(epfd: u64, events_ptr: u64, maxevents: u64, timeout_ts: u64, sigmask_ptr: u64) -> u64 {
+    let timeout_ms: i64 = if timeout_ts != 0 {
+        unsafe {
+            let sec = *(timeout_ts as *const u64);
+            let nsec = *((timeout_ts + 8) as *const u64);
+            (sec * 1000 + nsec / 1_000_000) as i64
+        }
+    } else {
+        -1
+    };
+    sys_epoll_pwait(epfd, events_ptr, maxevents, timeout_ms, sigmask_ptr)
+}
+
+fn check_epoll_events(epoll_lock: &Arc<spin::Mutex<crate::fs::vfs::EpollState>>, events_ptr: u64, maxevents: usize) -> usize {
+    let state = epoll_lock.lock();
+    let mut ready_count = 0;
+    for reg in state.registrations.iter() {
+        let mut revents: u32 = 0;
+        let fd = reg.fd;
+        if fd == 0 {
+            if crate::hal::serial::has_byte() {
+                revents |= 0x0001; // EPOLLIN
+            }
+        } else if fd == 1 || fd == 2 {
+            revents |= 0x0004; // EPOLLOUT
+        } else if fd > 0 && (fd as usize) < 64 {
+            unsafe {
+                if let Some(ref desc) = FD_TABLE[fd as usize] {
+                    match desc.node.kind {
+                        NodeKind::EventFd(ref lock) => {
+                            let ef = lock.lock();
+                            if ef.counter > 0 { revents |= 0x0001; }
+                            revents |= 0x0004;
+                        }
+                        NodeKind::Pipe(ref ring_lock) => {
+                            let ring = ring_lock.lock();
+                            if ring.count > 0 || ring.writers == 0 { revents |= 0x0001; }
+                            if crate::fs::vfs::PIPE_BUFFER_SIZE - ring.count > 0 { revents |= 0x0004; }
+                            if ring.writers == 0 { revents |= 0x0010; }
+                        }
+                        NodeKind::Socket(..) | NodeKind::UdpSocket(..) => {
+                            revents |= 0x0005;
+                        }
+                        _ => {
+                            revents |= 0x0005;
+                        }
+                    }
+                } else {
+                    revents |= 0x0020; // EPOLLERR
+                }
+            }
+        }
+        let matched = revents & reg.events;
+        if matched != 0 {
+            let out_ptr = unsafe { (events_ptr as *mut u8).add(ready_count * 16) };
+            unsafe {
+                core::ptr::write(out_ptr as *mut u32, matched);
+                core::ptr::write((out_ptr.add(4)) as *mut u32, 0);
+                core::ptr::write((out_ptr.add(8)) as *mut u64, reg.data);
+            }
+            ready_count += 1;
+            if ready_count >= maxevents {
+                break;
+            }
+        }
+    }
+    ready_count
+}
+
+fn get_current_time_ms() -> u64 {
+    let mut count: u64 = 0;
+    let mut freq: u64 = 0;
+    unsafe {
+        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) count);
+        core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) freq);
+    }
+    if freq > 0 {
+        (count * 1000) / freq
+    } else {
+        0
+    }
+}
+
+fn sys_symlinkat(target_ptr: u64, newdirfd: i64, linkpath_ptr: u64) -> u64 {
+    let target_str = match read_cstr(target_ptr) {
+        Some(s) => s,
+        None => return (-14i64) as u64,
+    };
+    let linkpath_str = match read_cstr(linkpath_ptr) {
+        Some(s) => s,
+        None => return (-14i64) as u64,
+    };
+    let full_linkpath = resolve_at_path(newdirfd, &linkpath_str);
+    let parts: alloc::vec::Vec<&str> = full_linkpath.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() { return (-22i64) as u64; }
+    let leaf_name = parts.last().unwrap();
+    let parent_path = if parts.len() > 1 {
+        let mut p = alloc::string::String::new();
+        for &comp in &parts[..parts.len() - 1] {
+            p.push('/');
+            p.push_str(comp);
+        }
+        p
+    } else {
+        alloc::string::String::from("/")
+    };
+
+    if let Some(parent_node) = crate::fs::vfs::lookup(&parent_path) {
+        let sym_node = Arc::new(VfsNode::new(
+            alloc::string::ToString::to_string(leaf_name),
+            NodeKind::SymLink(target_str),
+            0, 0, 0o777,
+        ));
+        parent_node.children.write().push(sym_node);
+        0
+    } else {
+        (-2i64) as u64 // -ENOENT
+    }
+}
+
+fn sys_mremap(old_addr: u64, old_size: u64, new_size: u64, _flags: u64, _new_addr: u64) -> u64 {
+    if old_size == 0 || new_size == 0 { return (-22i64) as u64; }
+    if new_size <= old_size {
+        return old_addr;
+    }
+    let new_mapped = sys_mmap(0, new_size, 3, 0x22, !0, 0);
+    if new_mapped == !0 {
+        return (-12i64) as u64; // -ENOMEM
+    }
+    if old_addr != 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(old_addr as *const u8, new_mapped as *mut u8, old_size as usize);
+        }
+    }
+    new_mapped
 }
