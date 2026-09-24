@@ -326,6 +326,57 @@ pub fn draw_char_with_bg(fb: &FbInfo, buffer: *mut u8, x: usize, y: usize, c: ch
     }
 }
 
+pub fn fill_rect(fb: &FbInfo, buffer: *mut u8, x: usize, y: usize, w: usize, h: usize, color: Color) {
+    let pitch = fb.pitch as usize;
+    let bpp = (fb.bpp / 8) as usize;
+    let x_end = (x + w).min(fb.width as usize);
+    let y_end = (y + h).min(fb.height as usize);
+
+    for py in y..y_end {
+        for px in x..x_end {
+            let offset = py * pitch + px * bpp;
+            unsafe {
+                core::ptr::write_volatile(buffer.add(offset), color.b);
+                core::ptr::write_volatile(buffer.add(offset + 1), color.g);
+                core::ptr::write_volatile(buffer.add(offset + 2), color.r);
+            }
+        }
+    }
+}
+
+pub fn parse_ansi_color_256(idx: u8) -> Color {
+    if idx < 16 {
+        match idx {
+            0 => Color { r: 0, g: 0, b: 0, a: 255 },         // Black
+            1 => Color { r: 243, g: 139, b: 168, a: 255 },   // Red
+            2 => Color { r: 166, g: 227, b: 161, a: 255 },   // Green
+            3 => Color { r: 249, g: 226, b: 175, a: 255 },   // Yellow
+            4 => Color { r: 137, g: 180, b: 250, a: 255 },   // Blue
+            5 => Color { r: 203, g: 166, b: 247, a: 255 },   // Magenta / Purple
+            6 => Color { r: 148, g: 226, b: 213, a: 255 },   // Cyan
+            7 => Color { r: 205, g: 214, b: 244, a: 255 },   // Light Gray / White
+            8 => Color { r: 88, g: 91, b: 112, a: 255 },     // Bright Black / Gray
+            9 => Color { r: 243, g: 139, b: 168, a: 255 },   // Bright Red
+            10 => Color { r: 166, g: 227, b: 161, a: 255 },  // Bright Green
+            11 => Color { r: 249, g: 226, b: 175, a: 255 },  // Bright Yellow
+            12 => Color { r: 137, g: 180, b: 250, a: 255 },  // Bright Blue
+            13 => Color { r: 245, g: 194, b: 231, a: 255 },  // Bright Pink
+            14 => Color { r: 137, g: 220, b: 235, a: 255 },  // Bright Cyan
+            15 => Color { r: 255, g: 255, b: 255, a: 255 },  // Pure White
+            _ => Color { r: 205, g: 214, b: 244, a: 255 },
+        }
+    } else if idx < 232 {
+        let c = idx - 16;
+        let r = ((c / 36) % 6) * 51;
+        let g = ((c / 6) % 6) * 51;
+        let b = (c % 6) * 51;
+        Color { r, g, b, a: 255 }
+    } else {
+        let gray = 8 + (idx - 232) * 10;
+        Color { r: gray, g: gray, b: gray, a: 255 }
+    }
+}
+
 pub fn console_print_str(fb: &FbInfo, buffer: *mut u8, s: &str) {
     let mut con = CONSOLE.lock();
     let char_w = 8 * con.scale;
@@ -336,35 +387,193 @@ pub fn console_print_str(fb: &FbInfo, buffer: *mut u8, s: &str) {
     let pitch = fb.pitch as usize;
     let bpp = (fb.bpp / 8) as usize;
 
+    let mut dirty_min_y = usize::MAX;
+    let mut dirty_max_y = 0usize;
+    let mut full_screen_dirty = false;
+
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             if chars.peek() == Some(&'[') {
                 chars.next();
-                let mut seq_buf = [0u8; 16];
+                let mut seq_buf = [0u8; 32];
                 let mut seq_len = 0;
                 while let Some(&next_c) = chars.peek() {
-                    if (next_c >= 'a' && next_c <= 'z') || (next_c >= 'A' && next_c <= 'Z') {
+                    if (next_c >= 'a' && next_c <= 'z') || (next_c >= 'A' && next_c <= 'Z') || next_c == '~' {
                         let terminator = chars.next().unwrap();
                         let seq_bytes = &seq_buf[..seq_len];
-                        if terminator == 'm' {
-                            match seq_bytes {
-                                b"0" => con.fg_color = Color { r: 205, g: 214, b: 244, a: 255 },
-                                b"1;32" | b"32" => con.fg_color = Color { r: 166, g: 227, b: 161, a: 255 }, // Green
-                                b"1;34" | b"34" => con.fg_color = Color { r: 137, g: 180, b: 250, a: 255 }, // Blue
-                                b"1;36" | b"36" => con.fg_color = Color { r: 148, g: 226, b: 213, a: 255 }, // Cyan
-                                b"1;31" | b"31" => con.fg_color = Color { r: 243, g: 139, b: 168, a: 255 }, // Red
-                                b"1;33" | b"33" => con.fg_color = Color { r: 249, g: 226, b: 175, a: 255 }, // Yellow
-                                b"1;35" | b"35" => con.fg_color = Color { r: 203, g: 166, b: 247, a: 255 }, // Purple
-                                b"1;37" | b"37" | b"1" => con.fg_color = Color { r: 255, g: 255, b: 255, a: 255 },
-                                _ => {}
+
+                        // Parse semicolon-separated numerical parameters
+                        let mut params = [0u32; 8];
+                        let mut param_count = 0;
+                        let mut current_val: Option<u32> = None;
+
+                        for &byte in seq_bytes {
+                            if byte >= b'0' && byte <= b'9' {
+                                let digit = (byte - b'0') as u32;
+                                current_val = Some(current_val.unwrap_or(0) * 10 + digit);
+                            } else if byte == b';' {
+                                if param_count < 8 {
+                                    params[param_count] = current_val.unwrap_or(0);
+                                    param_count += 1;
+                                }
+                                current_val = None;
                             }
-                        } else if terminator == 'J' && seq_bytes == b"2" {
-                            con.cursor_x = 10;
-                            con.cursor_y = 10;
-                            unsafe {
-                                core::ptr::write_bytes(buffer, 0, pitch * (fb.height as usize));
+                        }
+                        if let Some(val) = current_val {
+                            if param_count < 8 {
+                                params[param_count] = val;
+                                param_count += 1;
                             }
+                        }
+                        if param_count == 0 {
+                            params[0] = 0;
+                            param_count = 1;
+                        }
+
+                        match terminator {
+                            'm' => {
+                                // SGR - Select Graphic Rendition (Colors & Attributes)
+                                let mut idx = 0;
+                                while idx < param_count {
+                                    match params[idx] {
+                                        0 => {
+                                            con.fg_color = Color { r: 205, g: 214, b: 244, a: 255 };
+                                            con.bg_color = Color { r: 0, g: 0, b: 0, a: 255 };
+                                            idx += 1;
+                                        }
+                                        1 => {
+                                            // Bold
+                                            idx += 1;
+                                        }
+                                        30..=37 => {
+                                            con.fg_color = parse_ansi_color_256((params[idx] - 30) as u8);
+                                            idx += 1;
+                                        }
+                                        39 => {
+                                            con.fg_color = Color { r: 205, g: 214, b: 244, a: 255 };
+                                            idx += 1;
+                                        }
+                                        40..=47 => {
+                                            con.bg_color = parse_ansi_color_256((params[idx] - 40) as u8);
+                                            idx += 1;
+                                        }
+                                        49 => {
+                                            con.bg_color = Color { r: 0, g: 0, b: 0, a: 255 };
+                                            idx += 1;
+                                        }
+                                        90..=97 => {
+                                            con.fg_color = parse_ansi_color_256((params[idx] - 90 + 8) as u8);
+                                            idx += 1;
+                                        }
+                                        100..=107 => {
+                                            con.bg_color = parse_ansi_color_256((params[idx] - 100 + 8) as u8);
+                                            idx += 1;
+                                        }
+                                        38 => {
+                                            // 38;5;n or 38;2;r;g;b
+                                            if idx + 2 < param_count && params[idx + 1] == 5 {
+                                                con.fg_color = parse_ansi_color_256((params[idx + 2] & 0xFF) as u8);
+                                                idx += 3;
+                                            } else if idx + 4 < param_count && params[idx + 1] == 2 {
+                                                con.fg_color = Color {
+                                                    r: (params[idx + 2] & 0xFF) as u8,
+                                                    g: (params[idx + 3] & 0xFF) as u8,
+                                                    b: (params[idx + 4] & 0xFF) as u8,
+                                                    a: 255,
+                                                };
+                                                idx += 5;
+                                            } else {
+                                                idx += 1;
+                                            }
+                                        }
+                                        48 => {
+                                            // 48;5;n or 48;2;r;g;b
+                                            if idx + 2 < param_count && params[idx + 1] == 5 {
+                                                con.bg_color = parse_ansi_color_256((params[idx + 2] & 0xFF) as u8);
+                                                idx += 3;
+                                            } else if idx + 4 < param_count && params[idx + 1] == 2 {
+                                                con.bg_color = Color {
+                                                    r: (params[idx + 2] & 0xFF) as u8,
+                                                    g: (params[idx + 3] & 0xFF) as u8,
+                                                    b: (params[idx + 4] & 0xFF) as u8,
+                                                    a: 255,
+                                                };
+                                                idx += 5;
+                                            } else {
+                                                idx += 1;
+                                            }
+                                        }
+                                        _ => {
+                                            idx += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            'D' => {
+                                // Cursor Left
+                                let count = if params[0] == 0 { 1 } else { params[0] as usize };
+                                con.cursor_x = con.cursor_x.saturating_sub(count * char_w).max(10);
+                            }
+                            'C' => {
+                                // Cursor Right
+                                let count = if params[0] == 0 { 1 } else { params[0] as usize };
+                                con.cursor_x = (con.cursor_x + count * char_w).min(max_x);
+                            }
+                            'A' => {
+                                // Cursor Up
+                                let count = if params[0] == 0 { 1 } else { params[0] as usize };
+                                con.cursor_y = con.cursor_y.saturating_sub(count * line_h).max(10);
+                            }
+                            'B' => {
+                                // Cursor Down
+                                let count = if params[0] == 0 { 1 } else { params[0] as usize };
+                                con.cursor_y = (con.cursor_y + count * line_h).min(max_y);
+                            }
+                            'H' | 'f' => {
+                                // Cursor Position / Home
+                                let row = if params[0] == 0 { 1 } else { params[0] as usize };
+                                let col = if param_count > 1 && params[1] > 0 { params[1] as usize } else { 1 };
+                                con.cursor_y = (10 + (row.saturating_sub(1)) * line_h).min(max_y);
+                                con.cursor_x = (10 + (col.saturating_sub(1)) * char_w).min(max_x);
+                            }
+                            'K' => {
+                                // Erase in Line
+                                let mode = params[0];
+                                match mode {
+                                    0 => {
+                                        // Erase to end of line
+                                        let w = (fb.width as usize).saturating_sub(con.cursor_x);
+                                        fill_rect(fb, buffer, con.cursor_x, con.cursor_y, w, line_h, con.bg_color);
+                                        dirty_min_y = dirty_min_y.min(con.cursor_y);
+                                        dirty_max_y = dirty_max_y.max(con.cursor_y + line_h);
+                                    }
+                                    1 => {
+                                        // Erase start to cursor
+                                        fill_rect(fb, buffer, 10, con.cursor_y, con.cursor_x - 10, line_h, con.bg_color);
+                                        dirty_min_y = dirty_min_y.min(con.cursor_y);
+                                        dirty_max_y = dirty_max_y.max(con.cursor_y + line_h);
+                                    }
+                                    2 => {
+                                        // Erase entire line
+                                        let w = (fb.width as usize).saturating_sub(10);
+                                        fill_rect(fb, buffer, 10, con.cursor_y, w, line_h, con.bg_color);
+                                        dirty_min_y = dirty_min_y.min(con.cursor_y);
+                                        dirty_max_y = dirty_max_y.max(con.cursor_y + line_h);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            'J' => {
+                                // Erase in Display
+                                con.cursor_x = 10;
+                                con.cursor_y = 10;
+                                unsafe {
+                                    core::ptr::write_bytes(buffer, 0, pitch * (fb.height as usize));
+                                }
+                                full_screen_dirty = true;
+                            }
+                            _ => {}
                         }
                         break;
                     } else {
@@ -412,14 +621,25 @@ pub fn console_print_str(fb: &FbInfo, buffer: *mut u8, s: &str) {
                     }
                 }
                 con.cursor_y -= line_h;
+                full_screen_dirty = true;
             }
 
             draw_char_with_bg(fb, buffer, con.cursor_x, con.cursor_y, c, con.fg_color, con.bg_color, con.scale);
+            dirty_min_y = dirty_min_y.min(con.cursor_y);
+            dirty_max_y = dirty_max_y.max(con.cursor_y + line_h);
+
             con.cursor_x += char_w;
         }
     }
 
     unsafe {
-        clean_dcache_range(buffer as usize, pitch * (fb.height as usize));
+        if full_screen_dirty {
+            clean_dcache_range(buffer as usize, pitch * (fb.height as usize));
+        } else if dirty_min_y < dirty_max_y && dirty_min_y < fb.height as usize {
+            let start = dirty_min_y * pitch;
+            let end_y = dirty_max_y.min(fb.height as usize);
+            let len = (end_y - dirty_min_y) * pitch;
+            clean_dcache_range(buffer.add(start) as usize, len);
+        }
     }
 }

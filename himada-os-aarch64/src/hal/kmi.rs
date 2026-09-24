@@ -83,8 +83,38 @@ pub fn init() {
     }
 }
 
+static mut KEY_QUEUE: [u8; 32] = [0; 32];
+static mut KEY_HEAD: usize = 0;
+static mut KEY_TAIL: usize = 0;
+
+fn push_key(b: u8) {
+    unsafe {
+        let next = (KEY_TAIL + 1) % KEY_QUEUE.len();
+        if next != KEY_HEAD {
+            KEY_QUEUE[KEY_TAIL] = b;
+            KEY_TAIL = next;
+        }
+    }
+}
+
+fn pop_key() -> Option<u8> {
+    unsafe {
+        if KEY_HEAD == KEY_TAIL {
+            None
+        } else {
+            let b = KEY_QUEUE[KEY_HEAD];
+            KEY_HEAD = (KEY_HEAD + 1) % KEY_QUEUE.len();
+            Some(b)
+        }
+    }
+}
+
 /// Poll for a ready keypress. Returns ASCII char or None.
 pub fn poll_keyboard() -> Option<u8> {
+    if let Some(b) = pop_key() {
+        return Some(b);
+    }
+
     unsafe {
         if !KMI_READY || KMI_BASE == 0 { return None; }
         let stat = match crate::hal::exceptions::safe_read_u32(KMI_BASE + KMI_STAT) {
@@ -121,6 +151,54 @@ fn ps2_scancode_to_ascii(sc: u8) -> Option<u8> {
             return match sc {
                 0x1C => Some(b'\n'), // Numpad Enter
                 0x35 => Some(b'/'),  // Numpad /
+                0x48 => { // Up Arrow
+                    push_key(b'[');
+                    push_key(b'A');
+                    Some(0x1B)
+                }
+                0x50 => { // Down Arrow
+                    push_key(b'[');
+                    push_key(b'B');
+                    Some(0x1B)
+                }
+                0x4B => { // Left Arrow
+                    push_key(b'[');
+                    push_key(b'D');
+                    Some(0x1B)
+                }
+                0x4D => { // Right Arrow
+                    push_key(b'[');
+                    push_key(b'C');
+                    Some(0x1B)
+                }
+                0x47 => { // Home
+                    push_key(b'[');
+                    push_key(b'H');
+                    Some(0x1B)
+                }
+                0x4F => { // End
+                    push_key(b'[');
+                    push_key(b'F');
+                    Some(0x1B)
+                }
+                0x53 => { // Delete
+                    push_key(b'[');
+                    push_key(b'3');
+                    push_key(b'~');
+                    Some(0x1B)
+                }
+                0x49 => { // PageUp
+                    push_key(b'[');
+                    push_key(b'5');
+                    push_key(b'~');
+                    Some(0x1B)
+                }
+                0x51 => { // PageDown
+                    push_key(b'[');
+                    push_key(b'6');
+                    push_key(b'~');
+                    Some(0x1B)
+                }
                 _    => None,
             };
         }

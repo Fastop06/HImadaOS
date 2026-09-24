@@ -21,6 +21,7 @@ pub struct XhciDevice {
     pub port_id: usize,
     pub speed: usize,
     pub active: bool,
+    pub is_keyboard: bool,
 
     pub ep0_ring_phys: usize,
     pub ep0_ring_virt: *mut Trb,
@@ -43,6 +44,7 @@ impl Default for XhciDevice {
             port_id: 0,
             speed: 0,
             active: false,
+            is_keyboard: true,
             ep0_ring_phys: 0,
             ep0_ring_virt: ptr::null_mut(),
             ep0_enqueue_idx: 0,
@@ -111,25 +113,25 @@ pub static mut XHCI: XhciState = XhciState {
 
     devices: [
         XhciDevice {
-            slot_id: 0, port_id: 0, speed: 0, active: false,
+            slot_id: 0, port_id: 0, speed: 0, active: false, is_keyboard: true,
             ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
             ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
             report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
         },
         XhciDevice {
-            slot_id: 0, port_id: 0, speed: 0, active: false,
+            slot_id: 0, port_id: 0, speed: 0, active: false, is_keyboard: true,
             ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
             ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
             report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
         },
         XhciDevice {
-            slot_id: 0, port_id: 0, speed: 0, active: false,
+            slot_id: 0, port_id: 0, speed: 0, active: false, is_keyboard: true,
             ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
             ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
             report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
         },
         XhciDevice {
-            slot_id: 0, port_id: 0, speed: 0, active: false,
+            slot_id: 0, port_id: 0, speed: 0, active: false, is_keyboard: true,
             ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
             ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
             report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
@@ -458,11 +460,15 @@ pub fn init() {
             }
             serial_println!("[xHCI] Configured Endpoint 1 IN for Slot {}", slot_id);
 
+            let desc_buf_phys = dev_frame_phys + 0x300;
+            let desc_buf_virt = dev_frame_virt.add(0x300);
+
             let mut dev = XhciDevice {
                 slot_id,
                 port_id: port,
                 speed,
                 active: true,
+                is_keyboard: true,
                 ep0_ring_phys,
                 ep0_ring_virt,
                 ep0_enqueue_idx: 0,
@@ -480,21 +486,59 @@ pub fn init() {
             send_ep0_control_transfer(&mut dev, 0x00, 0x09, 1, 0, 0);
             for _ in 0..10_000 { core::hint::spin_loop(); }
 
-            // B. SET_IDLE(0, 0) — Only report when key state changes
-            send_ep0_control_transfer(&mut dev, 0x21, 0x0A, 0, 0, 0);
-            for _ in 0..10_000 { core::hint::spin_loop(); }
+            // Probe Configuration Descriptor to detect Interface Class and Protocol
+            let mut is_keyboard = true;
+            if send_ep0_get_descriptor(&mut dev, desc_buf_phys, desc_buf_virt, 2, 0, 64) {
+                let total_len = (*desc_buf_virt as usize).min(64);
+                let mut offset = 0;
+                while offset + 2 <= total_len {
+                    let b_len = *desc_buf_virt.add(offset) as usize;
+                    let b_type = *desc_buf_virt.add(offset + 1);
+                    if b_len == 0 { break; }
+                    if b_type == 4 && offset + 8 <= total_len {
+                        let iface_class = *desc_buf_virt.add(offset + 5);
+                        let iface_proto = *desc_buf_virt.add(offset + 7);
+                        if iface_class == 3 {
+                            if iface_proto == 2 {
+                                is_keyboard = false;
+                                serial_println!("[xHCI] Slot {} identified as USB Mouse/Tablet (proto=2).", slot_id);
+                            } else if iface_proto == 1 {
+                                is_keyboard = true;
+                                serial_println!("[xHCI] Slot {} confirmed as USB Boot Keyboard (proto=1).", slot_id);
+                            }
+                        }
+                        break;
+                    }
+                    offset += b_len;
+                }
+            } else {
+                // Parallels Desktop Apple Silicon fallback: Port 2 is Mouse/Tablet, Port 1 is Keyboard
+                if port == 2 {
+                    is_keyboard = false;
+                    serial_println!("[xHCI] Port 2 assumed USB Mouse/Tablet under Parallels Desktop.");
+                }
+            }
+            dev.is_keyboard = is_keyboard;
 
-            // C. SET_PROTOCOL(0) — Switch HID device to Boot Protocol
-            send_ep0_control_transfer(&mut dev, 0x21, 0x0B, 0, 0, 0);
-            for _ in 0..10_000 { core::hint::spin_loop(); }
+            if is_keyboard {
+                // B. SET_IDLE(0, 0) — Only report when key state changes
+                send_ep0_control_transfer(&mut dev, 0x21, 0x0A, 0, 0, 0);
+                for _ in 0..10_000 { core::hint::spin_loop(); }
 
-            // 13. Queue Initial Normal TRB for Input
-            queue_ep1_trb(&mut dev);
+                // C. SET_PROTOCOL(0) — Switch HID device to Boot Protocol
+                send_ep0_control_transfer(&mut dev, 0x21, 0x0B, 0, 0, 0);
+                for _ in 0..10_000 { core::hint::spin_loop(); }
+
+                // 13. Queue Initial Normal TRB for Keyboard Input
+                queue_ep1_trb(&mut dev);
+                serial_println!("[xHCI] Keyboard on Port {} (Slot {}) active and polling!", port, slot_id);
+            } else {
+                serial_println!("[xHCI] Device on Port {} (Slot {}) configured dormant (mouse ignore).", port, slot_id);
+            }
 
             let dev_idx = XHCI.num_devices;
             XHCI.devices[dev_idx] = dev;
             XHCI.num_devices += 1;
-            serial_println!("[xHCI] Device on Port {} (Slot {}) active and polling!", port, slot_id);
         }
 
         drain_event_ring();
@@ -577,6 +621,56 @@ unsafe fn send_ep0_control_transfer(dev: &mut XhciDevice, req_type: u8, request:
 
     // Ring Doorbell: slot_id with Target = 1 (EP0)
     ring_doorbell(dev.slot_id, 1);
+}
+
+unsafe fn send_ep0_get_descriptor(
+    dev: &mut XhciDevice,
+    buf_phys: usize,
+    buf_virt: *mut u8,
+    desc_type: u8,
+    desc_idx: u8,
+    length: u16,
+) -> bool {
+    ptr::write_bytes(buf_virt, 0, length as usize);
+    clean_cache(buf_virt as usize, length as usize);
+
+    let w_val = ((desc_type as u16) << 8) | (desc_idx as u16);
+    let setup_param = 0x80u64 | (0x06u64 << 8) | ((w_val as u64) << 16) | ((length as u64) << 48);
+
+    // 1. Setup Stage TRB
+    let trb0 = &mut *dev.ep0_ring_virt.add(dev.ep0_enqueue_idx);
+    trb0.parameter = setup_param;
+    trb0.status = 8;
+    trb0.control = (2 << 10) | (1 << 6) | (3 << 16) | dev.ep0_cycle; // Type 2 (Setup), IDT=1, TRT=3 (IN Data Stage)
+    clean_cache(trb0 as *const _ as usize, 16);
+    advance_dev_ep0_enqueue(dev);
+
+    // 2. Data Stage TRB
+    let trb1 = &mut *dev.ep0_ring_virt.add(dev.ep0_enqueue_idx);
+    trb1.parameter = buf_phys as u64;
+    trb1.status = length as u32;
+    trb1.control = (3 << 10) | (1 << 16) | dev.ep0_cycle; // Type 3 (Data), DIR=1 (IN)
+    clean_cache(trb1 as *const _ as usize, 16);
+    advance_dev_ep0_enqueue(dev);
+
+    // 3. Status Stage TRB
+    let trb2 = &mut *dev.ep0_ring_virt.add(dev.ep0_enqueue_idx);
+    trb2.parameter = 0;
+    trb2.status = 0;
+    trb2.control = (4 << 10) | (1 << 5) | dev.ep0_cycle; // Type 4 (Status), DIR=0 (OUT for IN data transfer), IOC=1
+    clean_cache(trb2 as *const _ as usize, 16);
+    advance_dev_ep0_enqueue(dev);
+
+    // Ring Doorbell: slot_id with Target = 1 (EP0)
+    ring_doorbell(dev.slot_id, 1);
+
+    for _ in 0..50_000 {
+        core::hint::spin_loop();
+    }
+    core::arch::asm!("dc ivac, {}", in(reg) buf_virt as usize);
+    core::arch::asm!("dsb ish");
+
+    *buf_virt > 0
 }
 
 unsafe fn queue_ep1_trb(dev: &mut XhciDevice) {
@@ -688,53 +782,94 @@ unsafe fn advance_event_dequeue() {
 // Keyboard Polling & Keycode Translation
 // ─────────────────────────────────────────────────────────────
 
+static mut KEY_QUEUE: [u8; 32] = [0; 32];
+static mut KEY_HEAD: usize = 0;
+static mut KEY_TAIL: usize = 0;
+
+fn push_key(b: u8) {
+    unsafe {
+        let next = (KEY_TAIL + 1) % KEY_QUEUE.len();
+        if next != KEY_HEAD {
+            KEY_QUEUE[KEY_TAIL] = b;
+            KEY_TAIL = next;
+        }
+    }
+}
+
+fn pop_key() -> Option<u8> {
+    unsafe {
+        if KEY_HEAD == KEY_TAIL {
+            None
+        } else {
+            let b = KEY_QUEUE[KEY_HEAD];
+            KEY_HEAD = (KEY_HEAD + 1) % KEY_QUEUE.len();
+            Some(b)
+        }
+    }
+}
+
 pub fn poll_keyboard() -> Option<u8> {
+    // 1. Drain any pending bytes from multi-byte escape sequences (arrows, home, end, etc.)
+    if let Some(b) = pop_key() {
+        return Some(b);
+    }
+
     unsafe {
         if !XHCI.initialized || XHCI.num_devices == 0 { return None; }
 
-        let ev_addr = XHCI.event_ring_virt.add(XHCI.event_dequeue_idx) as usize;
-        core::arch::asm!("dc ivac, {}", in(reg) ev_addr);
-        core::arch::asm!("dsb ish");
+        // Check up to 16 events in ring to not stall behind skipped non-keyboard events
+        for _ in 0..16 {
+            let ev_addr = XHCI.event_ring_virt.add(XHCI.event_dequeue_idx) as usize;
+            core::arch::asm!("dc ivac, {}", in(reg) ev_addr);
+            core::arch::asm!("dsb ish");
 
-        let ev = &*XHCI.event_ring_virt.add(XHCI.event_dequeue_idx);
-        let ctrl = ptr::read_volatile(&ev.control);
-        if (ctrl & 1) != XHCI.event_cycle {
-            return None;
-        }
+            let ev = &*XHCI.event_ring_virt.add(XHCI.event_dequeue_idx);
+            let ctrl = ptr::read_volatile(&ev.control);
+            if (ctrl & 1) != XHCI.event_cycle {
+                return None;
+            }
 
-        let trb_type = (ctrl >> 10) & 0x3F;
-        let slot_id = ((ctrl >> 24) & 0xFF) as u8;
-        let ep_id = ((ctrl >> 16) & 0x1F) as u8;
+            let trb_type = (ctrl >> 10) & 0x3F;
+            let slot_id = ((ctrl >> 24) & 0xFF) as u8;
+            let ep_id = ((ctrl >> 16) & 0x1F) as u8;
 
-        advance_event_dequeue();
+            advance_event_dequeue();
 
-        if trb_type == 32 && ep_id == 3 {
-            for dev in XHCI.devices.iter_mut() {
-                if dev.active && dev.slot_id == slot_id {
-                    // Invalidate report buffer cache
-                    core::arch::asm!("dc ivac, {}", in(reg) dev.report_buf_virt);
-                    core::arch::asm!("dsb ish");
-
-                    let modifier = *dev.report_buf_virt;
-                    let reserved = *dev.report_buf_virt.add(1);
-                    let keycode = *dev.report_buf_virt.add(2);
-
-                    // Re-arm EP1 transfer immediately
-                    queue_ep1_trb(dev);
-
-                    // Standard USB HID Boot Protocol Keyboard Report:
-                    // byte 0: modifier keys
-                    // byte 1: reserved (ALWAYS 0 in boot keyboard report!)
-                    // byte 2: keycode 1
-                    if reserved == 0 {
-                        if keycode != 0 && keycode != XHCI.prev_keycode {
-                            XHCI.prev_keycode = keycode;
-                            return hid_to_ascii(modifier, keycode);
-                        } else if keycode == 0 {
-                            XHCI.prev_keycode = 0;
+            if trb_type == 32 && ep_id == 3 {
+                for dev in XHCI.devices.iter_mut() {
+                    if dev.active && dev.slot_id == slot_id {
+                        if !dev.is_keyboard {
+                            // Non-keyboard device (e.g. mouse) - ignore completely
+                            break;
                         }
+
+                        // Invalidate report buffer cache
+                        core::arch::asm!("dc ivac, {}", in(reg) dev.report_buf_virt);
+                        core::arch::asm!("dsb ish");
+
+                        let modifier = *dev.report_buf_virt;
+                        let reserved = *dev.report_buf_virt.add(1);
+                        let keycode = *dev.report_buf_virt.add(2);
+
+                        // Re-arm EP1 transfer immediately
+                        queue_ep1_trb(dev);
+
+                        // Standard USB HID Boot Protocol Keyboard Report:
+                        // byte 0: modifier keys
+                        // byte 1: reserved (ALWAYS 0 in boot keyboard report!)
+                        // byte 2: keycode 1
+                        if reserved == 0 {
+                            if keycode != 0 && keycode != XHCI.prev_keycode {
+                                XHCI.prev_keycode = keycode;
+                                if let Some(ch) = hid_to_ascii(modifier, keycode) {
+                                    return Some(ch);
+                                }
+                            } else if keycode == 0 {
+                                XHCI.prev_keycode = 0;
+                            }
+                        }
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -744,6 +879,7 @@ pub fn poll_keyboard() -> Option<u8> {
 
 pub fn has_input() -> bool {
     unsafe {
+        if KEY_HEAD != KEY_TAIL { return true; }
         if !XHCI.initialized || XHCI.num_devices == 0 { return false; }
         let ev_addr = XHCI.event_ring_virt.add(XHCI.event_dequeue_idx) as usize;
         core::arch::asm!("dc ivac, {}", in(reg) ev_addr);
@@ -791,6 +927,67 @@ fn hid_to_ascii(modifier: u8, keycode: u8) -> Option<u8> {
         0x36 => Some(if shift { b'<' } else { b',' }), // , and <
         0x37 => Some(if shift { b'>' } else { b'.' }), // . and >
         0x38 => Some(if shift { b'?' } else { b'/' }), // / and ?
+
+        // Special Navigation & Editing keys (VT100 ANSI sequences)
+        0x52 => { // Up Arrow -> \x1b[A
+            push_key(b'[');
+            push_key(b'A');
+            Some(0x1B)
+        }
+        0x51 => { // Down Arrow -> \x1b[B
+            push_key(b'[');
+            push_key(b'B');
+            Some(0x1B)
+        }
+        0x50 => { // Left Arrow -> \x1b[D
+            push_key(b'[');
+            push_key(b'D');
+            Some(0x1B)
+        }
+        0x4F => { // Right Arrow -> \x1b[C
+            push_key(b'[');
+            push_key(b'C');
+            Some(0x1B)
+        }
+        0x4A => { // Home -> \x1b[H
+            push_key(b'[');
+            push_key(b'H');
+            Some(0x1B)
+        }
+        0x4D => { // End -> \x1b[F
+            push_key(b'[');
+            push_key(b'F');
+            Some(0x1B)
+        }
+        0x4C => { // Delete -> \x1b[3~
+            push_key(b'[');
+            push_key(b'3');
+            push_key(b'~');
+            Some(0x1B)
+        }
+        0x4B => { // PageUp -> \x1b[5~
+            push_key(b'[');
+            push_key(b'5');
+            push_key(b'~');
+            Some(0x1B)
+        }
+        0x4E => { // PageDown -> \x1b[6~
+            push_key(b'[');
+            push_key(b'6');
+            push_key(b'~');
+            Some(0x1B)
+        }
+
+        // Numpad
+        0x59..=0x61 => Some(b'1' + (keycode - 0x59)),
+        0x62 => Some(b'0'),
+        0x63 => Some(b'.'),
+        0x58 => Some(b'\n'),
+        0x54 => Some(b'/'),
+        0x55 => Some(b'*'),
+        0x56 => Some(b'-'),
+        0x57 => Some(b'+'),
+
         _ => None,
     }
 }

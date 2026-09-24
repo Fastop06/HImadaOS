@@ -232,8 +232,38 @@ pub fn try_init(base_phys: usize) -> bool {
     }
 }
 
+static mut KEY_QUEUE: [u8; 32] = [0; 32];
+static mut KEY_HEAD: usize = 0;
+static mut KEY_TAIL: usize = 0;
+
+fn push_key(b: u8) {
+    unsafe {
+        let next = (KEY_TAIL + 1) % KEY_QUEUE.len();
+        if next != KEY_HEAD {
+            KEY_QUEUE[KEY_TAIL] = b;
+            KEY_TAIL = next;
+        }
+    }
+}
+
+fn pop_key() -> Option<u8> {
+    unsafe {
+        if KEY_HEAD == KEY_TAIL {
+            None
+        } else {
+            let b = KEY_QUEUE[KEY_HEAD];
+            KEY_HEAD = (KEY_HEAD + 1) % KEY_QUEUE.len();
+            Some(b)
+        }
+    }
+}
+
 /// Poll for keyboard input. Returns ASCII byte or None.
 pub fn poll_keyboard() -> Option<u8> {
+    if let Some(b) = pop_key() {
+        return Some(b);
+    }
+
     unsafe {
         if !INPUT_READY { return None; }
 
@@ -348,6 +378,57 @@ fn linux_keycode_to_ascii(code: u16) -> Option<u8> {
             52 => if shift { b'>' } else { b'.' },
             53 => if shift { b'?' } else { b'/' },
             57 => b' ', // Space
+
+            // Arrow keys & Navigation
+            103 => { // KEY_UP
+                push_key(b'[');
+                push_key(b'A');
+                return Some(0x1B);
+            }
+            108 => { // KEY_DOWN
+                push_key(b'[');
+                push_key(b'B');
+                return Some(0x1B);
+            }
+            105 => { // KEY_LEFT
+                push_key(b'[');
+                push_key(b'D');
+                return Some(0x1B);
+            }
+            106 => { // KEY_RIGHT
+                push_key(b'[');
+                push_key(b'C');
+                return Some(0x1B);
+            }
+            102 => { // KEY_HOME
+                push_key(b'[');
+                push_key(b'H');
+                return Some(0x1B);
+            }
+            107 => { // KEY_END
+                push_key(b'[');
+                push_key(b'F');
+                return Some(0x1B);
+            }
+            111 => { // KEY_DELETE
+                push_key(b'[');
+                push_key(b'3');
+                push_key(b'~');
+                return Some(0x1B);
+            }
+            104 => { // KEY_PAGEUP
+                push_key(b'[');
+                push_key(b'5');
+                push_key(b'~');
+                return Some(0x1B);
+            }
+            109 => { // KEY_PAGEDOWN
+                push_key(b'[');
+                push_key(b'6');
+                push_key(b'~');
+                return Some(0x1B);
+            }
+
             // Numpad
             71 => b'7', 72 => b'8', 73 => b'9',
             75 => b'4', 76 => b'5', 77 => b'6',

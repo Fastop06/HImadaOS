@@ -69,9 +69,15 @@ pub fn write_byte(ch: u8) {
         let uart_fr = (UART_BASE + 0x18) as *const u32;
         let uart_dr = UART_BASE as *mut u32;
         // FR bit 5 is TXFF (Transmit FIFO Full)
-        let mut timeout = 100_000;
+        let mut timeout = 200;
         while (core::ptr::read_volatile(uart_fr) & 0x20) != 0 && timeout > 0 {
             timeout -= 1;
+        }
+        if timeout == 0 {
+            // UART FIFO full and unserviced (e.g. Parallels without serial port attached).
+            // Disable mapping so subsequent writes do not spin.
+            UART_MAPPED = false;
+            return;
         }
         core::ptr::write_volatile(uart_dr, ch as u32);
     }
