@@ -40,9 +40,18 @@ pub fn init() {
             // Map 1 page for this MMIO region
             map_device_page(base, base);
             // Validate: PL050 PrimeCell ID is at +0xFE0..+0xFF0
-            let pid0 = ptr::read_volatile((base + 0xFE0) as *const u8);
-            let pid1 = ptr::read_volatile((base + 0xFE4) as *const u8);
-            let ccid = ptr::read_volatile((base + 0xFF0) as *const u8);
+            let pid0 = match crate::hal::exceptions::safe_read_u32(base + 0xFE0) {
+                Some(v) => (v & 0xFF) as u8,
+                None => continue,
+            };
+            let pid1 = match crate::hal::exceptions::safe_read_u32(base + 0xFE4) {
+                Some(v) => (v & 0xFF) as u8,
+                None => continue,
+            };
+            let ccid = match crate::hal::exceptions::safe_read_u32(base + 0xFF0) {
+                Some(v) => (v & 0xFF) as u8,
+                None => continue,
+            };
             // PL050: PID0=0x50, PID1=0x10; PrimeCellID: 0x0D
             if (pid0 == 0x50 || pid0 == 0x51) && ccid == 0x0D {
                 // Enable KMI: bit 2 = KMIEN, bit 4 = RXINTREN (RX interrupt enable)
@@ -51,22 +60,23 @@ pub fn init() {
                 ptr::write_volatile((base + KMI_CLKDIV) as *mut u32, 0);
                 KMI_BASE = base;
                 KMI_READY = true;
-                crate::serial_println!("[KMI] PL050 keyboard at {:#X} (PID0={:#X})", base, pid0);
+                crate::serial_println!("[KMI] PL050 keyboard at {:#X} (PID0={:#X}, PID1={:#X})", base, pid0, pid1);
                 return;
             }
         }
         // Fallback: try probing by checking STAT register sanity
         for &base in KMI_BASES {
             map_device_page(base, base);
-            let stat = ptr::read_volatile((base + KMI_STAT) as *const u32);
-            // Sane status: not 0x00 and not 0xFFFF_FFFF
-            if stat != 0 && stat != 0xFFFF_FFFF && stat < 0x100 {
-                ptr::write_volatile((base + KMI_CR) as *mut u32, (1 << 2) | (1 << 4));
-                ptr::write_volatile((base + KMI_CLKDIV) as *mut u32, 0);
-                KMI_BASE = base;
-                KMI_READY = true;
-                crate::serial_println!("[KMI] PL050 fallback at {:#X} (STAT={:#X})", base, stat);
-                return;
+            if let Some(stat) = crate::hal::exceptions::safe_read_u32(base + KMI_STAT) {
+                // Sane status: not 0x00 and not 0xFFFF_FFFF
+                if stat != 0 && stat != 0xFFFF_FFFF && stat < 0x100 {
+                    ptr::write_volatile((base + KMI_CR) as *mut u32, (1 << 2) | (1 << 4));
+                    ptr::write_volatile((base + KMI_CLKDIV) as *mut u32, 0);
+                    KMI_BASE = base;
+                    KMI_READY = true;
+                    crate::serial_println!("[KMI] PL050 fallback at {:#X} (STAT={:#X})", base, stat);
+                    return;
+                }
             }
         }
         crate::serial_println!("[KMI] No PL050 keyboard found");
@@ -77,7 +87,10 @@ pub fn init() {
 pub fn poll_keyboard() -> Option<u8> {
     unsafe {
         if !KMI_READY || KMI_BASE == 0 { return None; }
-        let stat = ptr::read_volatile((KMI_BASE + KMI_STAT) as *const u32);
+        let stat = match crate::hal::exceptions::safe_read_u32(KMI_BASE + KMI_STAT) {
+            Some(s) => s,
+            None => return None,
+        };
         if (stat & STAT_RXB) == 0 { return None; }
         let scancode = ptr::read_volatile((KMI_BASE + KMI_DATA) as *const u32) as u8;
         ps2_scancode_to_ascii(scancode)

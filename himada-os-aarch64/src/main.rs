@@ -217,8 +217,7 @@ pub extern "C" fn kernel_main() -> ! {
     crate::hal::acpi::init();
     crate::hal::serial::init(dtb_ptr as usize);
     crate::hal::xhci::init();
-    // KMI (PL050 PS/2) init is deferred — only enabled when confirmed via ACPI MADT
-    // crate::hal::kmi::init();
+    crate::hal::kmi::init();
     if dtb_ptr != 0 {
         log_step("FDT Device Tree available.", Some("OK"));
     } else {

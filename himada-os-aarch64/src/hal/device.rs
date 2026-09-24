@@ -192,6 +192,9 @@ pub fn probe_pci_bus(ecam_base: usize) -> bool {
                                     }
                                 }
                             }
+                            DeviceType::Input => {
+                                crate::serial_println!("[Device Manager] Detected VirtIO Input (PCI) at {:02x}:{:02x}.{}!", bus, device, function);
+                            }
                             _ => {}
                         }
                     }

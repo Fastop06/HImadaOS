@@ -462,24 +462,29 @@ fn sys_openat(dirfd: u64, pathname: u64, flags: u64) -> u64 {
 fn sys_read(fd: u64, buf: u64, count: u64) -> u64 {
     if fd >= 64 { return !0; }
     if fd == 0 {
-        crate::net::socket::poll();
         if count == 0 || buf == 0 { return 0; }
         unsafe {
             if let Some(ref mut desc) = FD_TABLE[0] {
                 return read_from_desc(desc, buf, count);
             }
         }
-        // 1. VirtIO Input (Parallels Desktop AArch64 keyboard path)
-        if let Some(ch) = crate::hal::virtio_input::poll_keyboard() {
-            unsafe { *(buf as *mut u8) = ch; }
-            return 1;
-        }
-        // 2. Check USB HID Keyboard via xHCI (QEMU)
+        crate::net::socket::poll();
+        // 1. Check USB HID Keyboard via xHCI (Parallels Desktop Apple Silicon & QEMU)
         if let Some(ch) = crate::hal::xhci::poll_keyboard() {
             unsafe { *(buf as *mut u8) = ch; }
             return 1;
         }
-        // 3. Serial Port fallback (QEMU PL011 / UART console input)
+        // 2. Check VirtIO Input (Parallels Desktop AArch64 / virtio-input path)
+        if let Some(ch) = crate::hal::virtio_input::poll_keyboard() {
+            unsafe { *(buf as *mut u8) = ch; }
+            return 1;
+        }
+        // 3. Check PL050 KMI PS/2 Keyboard
+        if let Some(ch) = crate::hal::kmi::poll_keyboard() {
+            unsafe { *(buf as *mut u8) = ch; }
+            return 1;
+        }
+        // 4. Serial Port fallback (QEMU PL011 / UART console input)
         if let Some(ch) = crate::hal::serial::read_byte() {
             unsafe { *(buf as *mut u8) = ch; }
             return 1;

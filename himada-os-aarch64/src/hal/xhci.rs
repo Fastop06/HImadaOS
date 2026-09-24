@@ -15,33 +15,12 @@ pub struct Trb {
     pub control: u32,
 }
 
-// Global xHCI State
-pub struct XhciState {
-    pub initialized: bool,
-    pub mmio_base: usize,
-    pub oper_base: usize,
-    pub rts_base: usize,
-    pub db_base: usize,
-    pub cap_length: usize,
-    pub max_slots: usize,
-    pub max_ports: usize,
-    pub context_size: usize,
-
-    // Ring Pointers (Virtual & Physical)
-    pub cmd_ring_phys: usize,
-    pub cmd_ring_virt: *mut Trb,
-    pub cmd_enqueue_idx: usize,
-    pub cmd_cycle: u32,
-
-    pub event_ring_phys: usize,
-    pub event_ring_virt: *mut Trb,
-    pub event_dequeue_idx: usize,
-    pub event_cycle: u32,
-
-    // Keyboard Slot & Endpoints
-    pub kbd_slot: u8,
-    pub kbd_port: usize,
-    pub kbd_ready: bool,
+#[derive(Copy, Clone)]
+pub struct XhciDevice {
+    pub slot_id: u8,
+    pub port_id: usize,
+    pub speed: usize,
+    pub active: bool,
 
     pub ep0_ring_phys: usize,
     pub ep0_ring_virt: *mut Trb,
@@ -55,6 +34,56 @@ pub struct XhciState {
 
     pub report_buf_phys: usize,
     pub report_buf_virt: *mut u8,
+}
+
+impl Default for XhciDevice {
+    fn default() -> Self {
+        Self {
+            slot_id: 0,
+            port_id: 0,
+            speed: 0,
+            active: false,
+            ep0_ring_phys: 0,
+            ep0_ring_virt: ptr::null_mut(),
+            ep0_enqueue_idx: 0,
+            ep0_cycle: 1,
+            ep1_ring_phys: 0,
+            ep1_ring_virt: ptr::null_mut(),
+            ep1_enqueue_idx: 0,
+            ep1_cycle: 1,
+            report_buf_phys: 0,
+            report_buf_virt: ptr::null_mut(),
+        }
+    }
+}
+
+// Global xHCI State
+pub struct XhciState {
+    pub initialized: bool,
+    pub mmio_base: usize,
+    pub oper_base: usize,
+    pub rts_base: usize,
+    pub db_base: usize,
+    pub cap_length: usize,
+    pub max_slots: usize,
+    pub max_ports: usize,
+    pub context_size: usize,
+
+    // Command Ring
+    pub cmd_ring_phys: usize,
+    pub cmd_ring_virt: *mut Trb,
+    pub cmd_enqueue_idx: usize,
+    pub cmd_cycle: u32,
+
+    // Event Ring
+    pub event_ring_phys: usize,
+    pub event_ring_virt: *mut Trb,
+    pub event_dequeue_idx: usize,
+    pub event_cycle: u32,
+
+    // Multi-device slots (up to 4 active USB input devices)
+    pub devices: [XhciDevice; 4],
+    pub num_devices: usize,
 
     pub prev_keycode: u8,
 }
@@ -80,22 +109,33 @@ pub static mut XHCI: XhciState = XhciState {
     event_dequeue_idx: 0,
     event_cycle: 1,
 
-    kbd_slot: 0,
-    kbd_port: 0,
-    kbd_ready: false,
-
-    ep0_ring_phys: 0,
-    ep0_ring_virt: ptr::null_mut(),
-    ep0_enqueue_idx: 0,
-    ep0_cycle: 1,
-
-    ep1_ring_phys: 0,
-    ep1_ring_virt: ptr::null_mut(),
-    ep1_enqueue_idx: 0,
-    ep1_cycle: 1,
-
-    report_buf_phys: 0,
-    report_buf_virt: ptr::null_mut(),
+    devices: [
+        XhciDevice {
+            slot_id: 0, port_id: 0, speed: 0, active: false,
+            ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
+            ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
+            report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
+        },
+        XhciDevice {
+            slot_id: 0, port_id: 0, speed: 0, active: false,
+            ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
+            ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
+            report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
+        },
+        XhciDevice {
+            slot_id: 0, port_id: 0, speed: 0, active: false,
+            ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
+            ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
+            report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
+        },
+        XhciDevice {
+            slot_id: 0, port_id: 0, speed: 0, active: false,
+            ep0_ring_phys: 0, ep0_ring_virt: ptr::null_mut(), ep0_enqueue_idx: 0, ep0_cycle: 1,
+            ep1_ring_phys: 0, ep1_ring_virt: ptr::null_mut(), ep1_enqueue_idx: 0, ep1_cycle: 1,
+            report_buf_phys: 0, report_buf_virt: ptr::null_mut(),
+        },
+    ],
+    num_devices: 0,
 
     prev_keycode: 0,
 };
@@ -115,8 +155,8 @@ pub fn init() {
         }
         serial_println!("[xHCI] Probing xHCI Controller at {:#X}...", mmio_paddr);
 
-        // Map MMIO pages (64 KB = 16 pages)
-        for i in 0..16 {
+        // Map MMIO pages (at least 256 pages = 1 MB to cover cap, oper, rts, and db registers)
+        for i in 0..256 {
             map_device_page(mmio_paddr + i * 0x1000, mmio_paddr + i * 0x1000);
         }
 
@@ -147,6 +187,15 @@ pub fn init() {
         let oper_base = mmio_paddr + caplength;
         let rts_base = mmio_paddr + rtsoff;
         let db_base = mmio_paddr + dboff;
+
+        // Ensure higher regions are mapped if dboff or rtsoff are large
+        let max_offset = rtsoff.max(dboff) + 0x10000;
+        let pages_needed = (max_offset + 0xFFF) / 0x1000;
+        if pages_needed > 256 {
+            for i in 256..pages_needed {
+                map_device_page(mmio_paddr + i * 0x1000, mmio_paddr + i * 0x1000);
+            }
+        }
 
         serial_println!("[xHCI] CapLen: {}, Ver: {:#X}, Slots: {}, Ports: {}, CSZ: {}", 
             caplength, hciversion, max_slots, max_ports, context_size);
@@ -186,7 +235,7 @@ pub fn init() {
         let mut usbcmd = ptr::read_volatile(oper_base as *const u32);
         if (usbcmd & 1) != 0 {
             ptr::write_volatile(oper_base as *mut u32, usbcmd & !1);
-            for _ in 0..50_000 {
+            for _ in 0..100_000 {
                 let sts = ptr::read_volatile((oper_base + 4) as *const u32);
                 if (sts & 1) != 0 { break; } // Halted
                 core::hint::spin_loop();
@@ -195,14 +244,14 @@ pub fn init() {
 
         // 4. Reset Host Controller (HCRST)
         ptr::write_volatile(oper_base as *mut u32, 2);
-        for _ in 0..50_000 {
+        for _ in 0..100_000 {
             let cmd = ptr::read_volatile(oper_base as *const u32);
             let sts = ptr::read_volatile((oper_base + 4) as *const u32);
             if (cmd & 2) == 0 && (sts & (1 << 11)) == 0 { break; } // HCRST=0 and CNR=0
             core::hint::spin_loop();
         }
 
-        // 5. Allocate DMA Frames
+        // 5. Allocate Global DMA Frames
         let frame1_phys = match alloc_frame() {
             Some(f) => f,
             None => { serial_println!("[xHCI] OOM Frame 1"); return; }
@@ -210,14 +259,6 @@ pub fn init() {
         let frame1_virt = phys_to_virt(frame1_phys) as *mut u8;
         ptr::write_bytes(frame1_virt, 0, 4096);
         clean_cache(frame1_virt as usize, 4096);
-
-        let frame2_phys = match alloc_frame() {
-            Some(f) => f,
-            None => { serial_println!("[xHCI] OOM Frame 2"); return; }
-        };
-        let frame2_virt = phys_to_virt(frame2_phys) as *mut u8;
-        ptr::write_bytes(frame2_virt, 0, 4096);
-        clean_cache(frame2_virt as usize, 4096);
 
         // Memory Layout within Frame 1:
         // 0x000..0x200: DCBAA (64 pointers = 512 bytes)
@@ -227,7 +268,6 @@ pub fn init() {
         // 0x200..0x600: Command Ring (64 TRBs = 1024 bytes)
         let cmd_ring_phys = frame1_phys + 0x200;
         let cmd_ring_virt = frame1_virt.add(0x200) as *mut Trb;
-        // Last TRB is Link TRB back to start
         let cmd_link = &mut *cmd_ring_virt.add(63);
         cmd_link.parameter = cmd_ring_phys as u64;
         cmd_link.control = (6 << 10) | (1 << 1) | 1; // Type 6 (Link), TC=1, Cycle=1
@@ -246,35 +286,6 @@ pub fn init() {
         ptr::write(erst_virt.add(3), 0);
         clean_cache(erst_virt as usize, 64);
 
-        // 0xA40..0xB40: EP0 Control Transfer Ring (16 TRBs = 256 bytes)
-        let ep0_ring_phys = frame1_phys + 0xA40;
-        let ep0_ring_virt = frame1_virt.add(0xA40) as *mut Trb;
-        let ep0_link = &mut *ep0_ring_virt.add(15);
-        ep0_link.parameter = ep0_ring_phys as u64;
-        ep0_link.control = (6 << 10) | (1 << 1) | 1;
-        clean_cache(ep0_ring_virt as usize, 256);
-
-        // 0xB40..0xC40: EP1 Interrupt IN Transfer Ring (16 TRBs = 256 bytes)
-        let ep1_ring_phys = frame1_phys + 0xB40;
-        let ep1_ring_virt = frame1_virt.add(0xB40) as *mut Trb;
-        let ep1_link = &mut *ep1_ring_virt.add(15);
-        ep1_link.parameter = ep1_ring_phys as u64;
-        ep1_link.control = (6 << 10) | (1 << 1) | 1;
-        clean_cache(ep1_ring_virt as usize, 256);
-
-        // 0xC40..0xC80: HID Report Buffer (64 bytes)
-        let report_buf_phys = frame1_phys + 0xC40;
-        let report_buf_virt = frame1_virt.add(0xC40);
-
-        // Memory Layout within Frame 2:
-        // 0x000..0x800: Input Context (2048 bytes)
-        let input_ctx_phys = frame2_phys;
-        let input_ctx_virt = frame2_virt;
-
-        // 0x800..0x1000: Output Device Context (2048 bytes)
-        let output_ctx_phys = frame2_phys + 0x800;
-        let output_ctx_virt = frame2_virt.add(0x800);
-
         XHCI.cmd_ring_phys = cmd_ring_phys;
         XHCI.cmd_ring_virt = cmd_ring_virt;
         XHCI.cmd_enqueue_idx = 0;
@@ -284,19 +295,6 @@ pub fn init() {
         XHCI.event_ring_virt = event_ring_virt;
         XHCI.event_dequeue_idx = 0;
         XHCI.event_cycle = 1;
-
-        XHCI.ep0_ring_phys = ep0_ring_phys;
-        XHCI.ep0_ring_virt = ep0_ring_virt;
-        XHCI.ep0_enqueue_idx = 0;
-        XHCI.ep0_cycle = 1;
-
-        XHCI.ep1_ring_phys = ep1_ring_phys;
-        XHCI.ep1_ring_virt = ep1_ring_virt;
-        XHCI.ep1_enqueue_idx = 0;
-        XHCI.ep1_cycle = 1;
-
-        XHCI.report_buf_phys = report_buf_phys;
-        XHCI.report_buf_virt = report_buf_virt;
 
         // 6. Program Controller Operational & Runtime Registers
         let max_slots_en = (max_slots.min(16)) as u32;
@@ -312,7 +310,7 @@ pub fn init() {
         ptr::write_volatile((rts_base + 0x28) as *mut u32, 1); // ERSTSZ = 1
         ptr::write_volatile((rts_base + 0x30) as *mut u32, erst_phys as u32); // ERSTBA
         ptr::write_volatile((rts_base + 0x34) as *mut u32, (erst_phys >> 32) as u32);
-        ptr::write_volatile((rts_base + 0x38) as *mut u32, (event_ring_phys as u32) | (1 << 3)); // ERDP
+        ptr::write_volatile((rts_base + 0x38) as *mut u32, (event_ring_phys as u32) | (1 << 3)); // ERDP with EHB=1
         ptr::write_volatile((rts_base + 0x3C) as *mut u32, (event_ring_phys >> 32) as u32);
 
         // Enable Interrupter (IE = 1)
@@ -320,7 +318,7 @@ pub fn init() {
 
         // 7. Start Controller: USBCMD.RS = 1
         ptr::write_volatile(oper_base as *mut u32, 1);
-        for _ in 0..50_000 {
+        for _ in 0..100_000 {
             let sts = ptr::read_volatile((oper_base + 4) as *const u32);
             if (sts & 1) == 0 { break; } // Running!
             core::hint::spin_loop();
@@ -328,123 +326,180 @@ pub fn init() {
         serial_println!("[xHCI] Host Controller started successfully.");
 
         // 8. Discover and Reset Connected Ports
-        let mut target_port = 0;
-        let mut target_speed = 0;
+        let mut connected_ports = [(0usize, 0usize); 4]; // (port, speed)
+        let mut num_connected = 0;
 
         for port in 1..=max_ports {
+            if num_connected >= 4 { break; }
             let portsc_ptr = (oper_base + 0x400 + (port - 1) * 0x10) as *mut u32;
             let mut sc = ptr::read_volatile(portsc_ptr);
             if (sc & 1) != 0 { // Current Connect Status (CCS = 1)
                 serial_println!("[xHCI] Port {} device connected. Resetting...", port);
-                // Reset port (PR = bit 4)
-                ptr::write_volatile(portsc_ptr, sc | (1 << 4));
-                for _ in 0..50_000 {
+                // In xHCI PORTSC: R/W1CS bits (especially PED bit 1 and change bits 17..23)
+                // MUST BE PRESERVED AS 0 to avoid disabling port or clearing status unexpectedly!
+                const PORT_RWC_MASK: u32 = (1 << 1) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
+                ptr::write_volatile(portsc_ptr, (sc & !PORT_RWC_MASK) | (1 << 4)); // Assert PR=1
+
+                for _ in 0..1_000_000 {
                     sc = ptr::read_volatile(portsc_ptr);
                     if (sc & (1 << 4)) == 0 && (sc & 2) != 0 { break; } // PR=0, PED=1 (Port Enabled)
                     core::hint::spin_loop();
                 }
+                // Clear Port Reset Change (PRC = bit 21)
+                ptr::write_volatile(portsc_ptr, (sc & !PORT_RWC_MASK) | (1 << 21));
+
                 let speed = (sc >> 10) & 0xF;
-                serial_println!("[xHCI] Port {} reset complete. Speed: {}", port, speed);
-                
-                // In Parallels: Port 2 is the Keyboard (Port 1 is Mouse)
-                // In QEMU: First connected port with speed is the Keyboard
-                if port == 2 || target_port == 0 {
-                    target_port = port;
-                    target_speed = speed;
+                let ped = (sc & 2) != 0;
+                serial_println!("[xHCI] Port {} reset complete. PED={}, Speed: {}", port, ped, speed);
+
+                if ped && speed != 0 {
+                    connected_ports[num_connected] = (port, speed as usize);
+                    num_connected += 1;
                 }
             }
         }
 
-        if target_port == 0 {
-            serial_println!("[xHCI] No active USB devices on ports.");
+        if num_connected == 0 {
+            serial_println!("[xHCI] No active USB devices found on ports.");
             XHCI.initialized = true;
             return;
         }
 
-        // 9. Enable Slot Command
-        let slot_id = send_enable_slot_cmd();
-        if slot_id == 0 {
-            serial_println!("[xHCI] Failed to enable device slot.");
-            return;
+        // 9. Configure Each Connected Port
+        for i in 0..num_connected {
+            let (port, speed) = connected_ports[i];
+            let slot_id = send_enable_slot_cmd();
+            if slot_id == 0 {
+                serial_println!("[xHCI] Failed to enable device slot for Port {}.", port);
+                continue;
+            }
+            serial_println!("[xHCI] Port {} assigned to Device Slot {}", port, slot_id);
+
+            // Allocate 1 frame for this device's rings, buffers, and contexts
+            let dev_frame_phys = match alloc_frame() {
+                Some(f) => f,
+                None => { serial_println!("[xHCI] OOM for device frame"); continue; }
+            };
+            let dev_frame_virt = phys_to_virt(dev_frame_phys) as *mut u8;
+            ptr::write_bytes(dev_frame_virt, 0, 4096);
+            clean_cache(dev_frame_virt as usize, 4096);
+
+            // 0x000..0x100: EP0 Ring (16 TRBs = 256 bytes)
+            let ep0_ring_phys = dev_frame_phys;
+            let ep0_ring_virt = dev_frame_virt as *mut Trb;
+            let ep0_link = &mut *ep0_ring_virt.add(15);
+            ep0_link.parameter = ep0_ring_phys as u64;
+            ep0_link.control = (6 << 10) | (1 << 1) | 1;
+
+            // 0x100..0x200: EP1 Ring (16 TRBs = 256 bytes)
+            let ep1_ring_phys = dev_frame_phys + 0x100;
+            let ep1_ring_virt = dev_frame_virt.add(0x100) as *mut Trb;
+            let ep1_link = &mut *ep1_ring_virt.add(15);
+            ep1_link.parameter = ep1_ring_phys as u64;
+            ep1_link.control = (6 << 10) | (1 << 1) | 1;
+
+            clean_cache(ep0_ring_virt as usize, 256);
+            clean_cache(ep1_ring_virt as usize, 256);
+
+            // 0x200..0x280: HID Report Buffer (128 bytes)
+            let report_buf_phys = dev_frame_phys + 0x200;
+            let report_buf_virt = dev_frame_virt.add(0x200);
+
+            // 0x800..0xC00: Input Context (1024 bytes)
+            let input_ctx_phys = dev_frame_phys + 0x800;
+            let input_ctx_virt = dev_frame_virt.add(0x800);
+
+            // 0xC00..0x1000: Output Device Context (1024 bytes)
+            let output_ctx_phys = dev_frame_phys + 0xC00;
+
+            // Set DCBAA[slot_id] = output_ctx_phys
+            *dcbaa_virt.add(slot_id as usize) = output_ctx_phys as u64;
+            clean_cache(dcbaa_virt.add(slot_id as usize) as usize, 8);
+
+            // 10. Address Device Command
+            let ctrl_ctx = input_ctx_virt as *mut u32;
+            ptr::write(ctrl_ctx.add(1), 0b11); // Add Slot (bit 0) + EP0 (bit 1)
+
+            let slot_ctx = input_ctx_virt.add(context_size) as *mut u32;
+            ptr::write(slot_ctx, ((speed as u32) << 20) | (4 << 27)); // Speed, Context Entries = 4
+            ptr::write(slot_ctx.add(1), (port as u32) << 16); // Root Hub Port
+
+            let ep0_ctx = input_ctx_virt.add(context_size * 2) as *mut u32;
+            let mps = if speed == 3 { 64u32 } else { 8u32 };
+            ptr::write(ep0_ctx.add(1), (4 << 3) | (mps << 16) | (3 << 1)); // EP Type 4 (Control), CErr=3
+            ptr::write(ep0_ctx.add(2), (ep0_ring_phys as u32) | 1);
+            ptr::write(ep0_ctx.add(3), (ep0_ring_phys >> 32) as u32);
+            ptr::write(ep0_ctx.add(4), 8);
+            clean_cache(input_ctx_virt as usize, 1024);
+
+            if !send_address_device_cmd(slot_id, input_ctx_phys) {
+                serial_println!("[xHCI] Address Device failed for Slot {}.", slot_id);
+                continue;
+            }
+            serial_println!("[xHCI] Addressed Device on Slot {}", slot_id);
+
+            // 11. Configure EP1 IN (Interrupt IN for Keyboard / HID)
+            ptr::write_bytes(input_ctx_virt, 0, 1024);
+            ptr::write(ctrl_ctx.add(1), (1 << 0) | (1 << 3)); // Add Slot + EP1 IN (DCI 3)
+            ptr::write(slot_ctx, ((speed as u32) << 20) | (4 << 27));
+            ptr::write(slot_ctx.add(1), (port as u32) << 16);
+
+            let ep1_ctx = input_ctx_virt.add(context_size * 4) as *mut u32;
+            ptr::write(ep1_ctx, 3 << 16); // Interval = 3 (8ms)
+            ptr::write(ep1_ctx.add(1), (7 << 3) | (8 << 16) | (3 << 1)); // EP Type 7 (Interrupt IN), MPS=8, CErr=3
+            ptr::write(ep1_ctx.add(2), (ep1_ring_phys as u32) | 1);
+            ptr::write(ep1_ctx.add(3), (ep1_ring_phys >> 32) as u32);
+            ptr::write(ep1_ctx.add(4), 8);
+            clean_cache(input_ctx_virt as usize, 1024);
+
+            if !send_configure_endpoint_cmd(slot_id, input_ctx_phys) {
+                serial_println!("[xHCI] Configure Endpoint failed for Slot {}.", slot_id);
+                continue;
+            }
+            serial_println!("[xHCI] Configured Endpoint 1 IN for Slot {}", slot_id);
+
+            let mut dev = XhciDevice {
+                slot_id,
+                port_id: port,
+                speed,
+                active: true,
+                ep0_ring_phys,
+                ep0_ring_virt,
+                ep0_enqueue_idx: 0,
+                ep0_cycle: 1,
+                ep1_ring_phys,
+                ep1_ring_virt,
+                ep1_enqueue_idx: 0,
+                ep1_cycle: 1,
+                report_buf_phys,
+                report_buf_virt,
+            };
+
+            // 12. USB Standard & Class Requests
+            // A. SET_CONFIGURATION(1) — Mandatory to transition device into Configured State!
+            send_ep0_control_transfer(&mut dev, 0x00, 0x09, 1, 0, 0);
+            for _ in 0..10_000 { core::hint::spin_loop(); }
+
+            // B. SET_IDLE(0, 0) — Only report when key state changes
+            send_ep0_control_transfer(&mut dev, 0x21, 0x0A, 0, 0, 0);
+            for _ in 0..10_000 { core::hint::spin_loop(); }
+
+            // C. SET_PROTOCOL(0) — Switch HID device to Boot Protocol
+            send_ep0_control_transfer(&mut dev, 0x21, 0x0B, 0, 0, 0);
+            for _ in 0..10_000 { core::hint::spin_loop(); }
+
+            // 13. Queue Initial Normal TRB for Input
+            queue_ep1_trb(&mut dev);
+
+            let dev_idx = XHCI.num_devices;
+            XHCI.devices[dev_idx] = dev;
+            XHCI.num_devices += 1;
+            serial_println!("[xHCI] Device on Port {} (Slot {}) active and polling!", port, slot_id);
         }
-        serial_println!("[xHCI] Enabled Device Slot {}", slot_id);
-        XHCI.kbd_slot = slot_id;
-        XHCI.kbd_port = target_port;
 
-        // Set DCBAA[slot_id] = output_ctx_phys
-        *dcbaa_virt.add(slot_id as usize) = output_ctx_phys as u64;
-        clean_cache(dcbaa_virt.add(slot_id as usize) as usize, 8);
-
-        // 10. Address Device Command
-        // Setup Input Context:
-        // Control Context: add Slot (bit 0) and EP0 (bit 1)
-        let ctrl_ctx = input_ctx_virt as *mut u32;
-        ptr::write(ctrl_ctx.add(1), 0b11); // Add flags: Slot (bit 0) + EP0 (bit 1)
-
-        // Slot Context:
-        let slot_ctx = input_ctx_virt.add(context_size) as *mut u32;
-        // Dword 0: Route String (0), Speed (target_speed << 20), Context Entries (4 << 27)
-        ptr::write(slot_ctx, ((target_speed as u32) << 20) | (4 << 27));
-        // Dword 1: Root Hub Port Number (target_port << 16)
-        ptr::write(slot_ctx.add(1), (target_port as u32) << 16);
-
-        // EP0 Context:
-        let ep0_ctx = input_ctx_virt.add(context_size * 2) as *mut u32;
-        // Dword 1: EP Type = 4 (Control bidirectional), Max Packet Size = 8 (or 64 for HighSpeed)
-        let mps = if target_speed == 3 { 64u32 } else { 8u32 };
-        ptr::write(ep0_ctx.add(1), (4 << 3) | (mps << 16) | (3 << 1)); // CErr=3
-        // Dwords 2 & 3: TR Dequeue Pointer | DCS (bit 0 = 1)
-        ptr::write(ep0_ctx.add(2), (ep0_ring_phys as u32) | 1);
-        ptr::write(ep0_ctx.add(3), (ep0_ring_phys >> 32) as u32);
-        // Dword 4: Average TRB Length = 8
-        ptr::write(ep0_ctx.add(4), 8);
-
-        clean_cache(input_ctx_virt as usize, 1024);
-
-        if !send_address_device_cmd(slot_id, input_ctx_phys) {
-            serial_println!("[xHCI] Address Device failed.");
-            return;
-        }
-        serial_println!("[xHCI] Addressed Device on Slot {}", slot_id);
-
-        // 11. Configure EP1 IN (Interrupt IN for Keyboard)
-        ptr::write_bytes(input_ctx_virt, 0, 1024);
-        ptr::write(ctrl_ctx.add(1), (1 << 0) | (1 << 3)); // Add Slot + EP1 IN (DCI 3)
-
-        // Slot Context: Context Entries = 4
-        ptr::write(slot_ctx, ((target_speed as u32) << 20) | (4 << 27));
-        ptr::write(slot_ctx.add(1), (target_port as u32) << 16);
-
-        // EP1 IN Context (DCI 3 = index 3 in 1-based DCI, context offset = index 4):
-        let ep1_ctx = input_ctx_virt.add(context_size * 4) as *mut u32;
-        // Dword 0: Interval = 3 (8ms)
-        ptr::write(ep1_ctx, 3 << 16);
-        // Dword 1: EP Type = 7 (Interrupt IN), Max Packet Size = 8, CErr = 3
-        ptr::write(ep1_ctx.add(1), (7 << 3) | (8 << 16) | (3 << 1));
-        // Dwords 2 & 3: TR Dequeue Pointer | DCS (bit 0 = 1)
-        ptr::write(ep1_ctx.add(2), (ep1_ring_phys as u32) | 1);
-        ptr::write(ep1_ctx.add(3), (ep1_ring_phys >> 32) as u32);
-        // Dword 4: Average TRB Length = 8
-        ptr::write(ep1_ctx.add(4), 8);
-
-        clean_cache(input_ctx_virt as usize, 1024);
-
-        if !send_configure_endpoint_cmd(slot_id, input_ctx_phys) {
-            serial_println!("[xHCI] Configure Endpoint failed.");
-            return;
-        }
-        serial_println!("[xHCI] Configured Endpoint 1 IN for Keyboard!");
-
-        // 12. Set Boot Protocol: USB HID Class Request SET_PROTOCOL(0) via EP0
-        // Setup packet: bmRequestType=0x21, bRequest=0x0B, wValue=0, wIndex=0, wLength=0
-        send_ep0_control_transfer(slot_id, 0x21, 0x0B, 0, 0, 0, 0);
-
-        // 13. Queue Initial Normal TRB for Keyboard Input
-        queue_keyboard_trb();
-
-        XHCI.kbd_ready = true;
+        drain_event_ring();
         XHCI.initialized = true;
-        serial_println!("[xHCI] USB Keyboard driver active and polling!");
+        serial_println!("[xHCI] Driver ready. Total active devices: {}", XHCI.num_devices);
     }
 }
 
@@ -501,38 +556,38 @@ unsafe fn send_configure_endpoint_cmd(slot_id: u8, input_ctx_phys: usize) -> boo
     false
 }
 
-unsafe fn send_ep0_control_transfer(slot_id: u8, req_type: u8, request: u8, val: u16, idx: u16, len: u16, data_phys: usize) {
+unsafe fn send_ep0_control_transfer(dev: &mut XhciDevice, req_type: u8, request: u8, val: u16, idx: u16, len: u16) {
     let setup_param = (req_type as u64) | ((request as u64) << 8) | ((val as u64) << 16) | ((idx as u64) << 32) | ((len as u64) << 48);
 
     // Setup Stage TRB
-    let trb0 = &mut *XHCI.ep0_ring_virt.add(XHCI.ep0_enqueue_idx);
+    let trb0 = &mut *dev.ep0_ring_virt.add(dev.ep0_enqueue_idx);
     trb0.parameter = setup_param;
     trb0.status = 8;
-    trb0.control = (2 << 10) | (1 << 6) | XHCI.ep0_cycle; // Type 2 (Setup), IDT=1
+    trb0.control = (2 << 10) | (1 << 6) | dev.ep0_cycle; // Type 2 (Setup), IDT=1, TRT=0 (No Data Stage)
     clean_cache(trb0 as *const _ as usize, 16);
-    advance_ep0_enqueue();
+    advance_dev_ep0_enqueue(dev);
 
     // Status Stage TRB
-    let trb1 = &mut *XHCI.ep0_ring_virt.add(XHCI.ep0_enqueue_idx);
+    let trb1 = &mut *dev.ep0_ring_virt.add(dev.ep0_enqueue_idx);
     trb1.parameter = 0;
     trb1.status = 0;
-    trb1.control = (4 << 10) | (1 << 16) | (1 << 5) | XHCI.ep0_cycle; // Type 4 (Status), IN, IOC=1
+    trb1.control = (4 << 10) | (1 << 16) | (1 << 5) | dev.ep0_cycle; // Type 4 (Status), IN, IOC=1
     clean_cache(trb1 as *const _ as usize, 16);
-    advance_ep0_enqueue();
+    advance_dev_ep0_enqueue(dev);
 
     // Ring Doorbell: slot_id with Target = 1 (EP0)
-    ring_doorbell(slot_id, 1);
+    ring_doorbell(dev.slot_id, 1);
 }
 
-unsafe fn queue_keyboard_trb() {
-    let trb = &mut *XHCI.ep1_ring_virt.add(XHCI.ep1_enqueue_idx);
-    trb.parameter = XHCI.report_buf_phys as u64;
+unsafe fn queue_ep1_trb(dev: &mut XhciDevice) {
+    let trb = &mut *dev.ep1_ring_virt.add(dev.ep1_enqueue_idx);
+    trb.parameter = dev.report_buf_phys as u64;
     trb.status = 8;
-    trb.control = (1 << 10) | (1 << 5) | (1 << 2) | XHCI.ep1_cycle; // Type 1 (Normal), IOC=1, ISP=1
+    trb.control = (1 << 10) | (1 << 5) | (1 << 2) | dev.ep1_cycle; // Type 1 (Normal), IOC=1, ISP=1
     clean_cache(trb as *const _ as usize, 16);
 
-    advance_ep1_enqueue();
-    ring_doorbell(XHCI.kbd_slot, 3); // Target 3 = EP1 IN (DCI 3)
+    advance_dev_ep1_enqueue(dev);
+    ring_doorbell(dev.slot_id, 3); // Target 3 = EP1 IN (DCI 3)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -542,7 +597,6 @@ unsafe fn queue_keyboard_trb() {
 unsafe fn advance_cmd_enqueue() {
     XHCI.cmd_enqueue_idx += 1;
     if XHCI.cmd_enqueue_idx == 63 {
-        // Link TRB
         let link = &mut *XHCI.cmd_ring_virt.add(63);
         link.control = (6 << 10) | (1 << 1) | XHCI.cmd_cycle;
         clean_cache(link as *const _ as usize, 16);
@@ -551,25 +605,25 @@ unsafe fn advance_cmd_enqueue() {
     }
 }
 
-unsafe fn advance_ep0_enqueue() {
-    XHCI.ep0_enqueue_idx += 1;
-    if XHCI.ep0_enqueue_idx == 15 {
-        let link = &mut *XHCI.ep0_ring_virt.add(15);
-        link.control = (6 << 10) | (1 << 1) | XHCI.ep0_cycle;
+unsafe fn advance_dev_ep0_enqueue(dev: &mut XhciDevice) {
+    dev.ep0_enqueue_idx += 1;
+    if dev.ep0_enqueue_idx == 15 {
+        let link = &mut *dev.ep0_ring_virt.add(15);
+        link.control = (6 << 10) | (1 << 1) | dev.ep0_cycle;
         clean_cache(link as *const _ as usize, 16);
-        XHCI.ep0_cycle ^= 1;
-        XHCI.ep0_enqueue_idx = 0;
+        dev.ep0_cycle ^= 1;
+        dev.ep0_enqueue_idx = 0;
     }
 }
 
-unsafe fn advance_ep1_enqueue() {
-    XHCI.ep1_enqueue_idx += 1;
-    if XHCI.ep1_enqueue_idx == 15 {
-        let link = &mut *XHCI.ep1_ring_virt.add(15);
-        link.control = (6 << 10) | (1 << 1) | XHCI.ep1_cycle;
+unsafe fn advance_dev_ep1_enqueue(dev: &mut XhciDevice) {
+    dev.ep1_enqueue_idx += 1;
+    if dev.ep1_enqueue_idx == 15 {
+        let link = &mut *dev.ep1_ring_virt.add(15);
+        link.control = (6 << 10) | (1 << 1) | dev.ep1_cycle;
         clean_cache(link as *const _ as usize, 16);
-        XHCI.ep1_cycle ^= 1;
-        XHCI.ep1_enqueue_idx = 0;
+        dev.ep1_cycle ^= 1;
+        dev.ep1_enqueue_idx = 0;
     }
 }
 
@@ -591,9 +645,7 @@ unsafe fn wait_command_completion() -> Option<(u8, u8)> {
             let status = ptr::read_volatile(&ev.status);
             let completion_code = ((status >> 24) & 0xFF) as u8;
             let slot_id = ((ctrl >> 24) & 0xFF) as u8;
-            serial_println!("[xHCI Event] type={}, cc={}, slot={}", trb_type, completion_code, slot_id);
 
-            // Advance Dequeue
             advance_event_dequeue();
 
             if trb_type == 33 { // Command Completion Event
@@ -603,6 +655,22 @@ unsafe fn wait_command_completion() -> Option<(u8, u8)> {
         core::hint::spin_loop();
     }
     None
+}
+
+unsafe fn drain_event_ring() {
+    for _ in 0..10_000 {
+        let ev_addr = XHCI.event_ring_virt.add(XHCI.event_dequeue_idx) as usize;
+        core::arch::asm!("dc ivac, {}", in(reg) ev_addr);
+        core::arch::asm!("dsb ish");
+
+        let ev = &*XHCI.event_ring_virt.add(XHCI.event_dequeue_idx);
+        let ctrl = ptr::read_volatile(&ev.control);
+        if (ctrl & 1) == XHCI.event_cycle {
+            advance_event_dequeue();
+        } else {
+            break;
+        }
+    }
 }
 
 unsafe fn advance_event_dequeue() {
@@ -622,7 +690,7 @@ unsafe fn advance_event_dequeue() {
 
 pub fn poll_keyboard() -> Option<u8> {
     unsafe {
-        if !XHCI.initialized || !XHCI.kbd_ready { return None; }
+        if !XHCI.initialized || XHCI.num_devices == 0 { return None; }
 
         let ev_addr = XHCI.event_ring_virt.add(XHCI.event_dequeue_idx) as usize;
         core::arch::asm!("dc ivac, {}", in(reg) ev_addr);
@@ -640,25 +708,49 @@ pub fn poll_keyboard() -> Option<u8> {
 
         advance_event_dequeue();
 
-        if trb_type == 32 && slot_id == XHCI.kbd_slot && ep_id == 3 {
-            // Invalidate cache before reading report
-            core::arch::asm!("dc ivac, {}", in(reg) XHCI.report_buf_virt);
-            core::arch::asm!("dsb ish");
+        if trb_type == 32 && ep_id == 3 {
+            for dev in XHCI.devices.iter_mut() {
+                if dev.active && dev.slot_id == slot_id {
+                    // Invalidate report buffer cache
+                    core::arch::asm!("dc ivac, {}", in(reg) dev.report_buf_virt);
+                    core::arch::asm!("dsb ish");
 
-            let modifier = *XHCI.report_buf_virt;
-            let keycode = *XHCI.report_buf_virt.add(2);
+                    let modifier = *dev.report_buf_virt;
+                    let reserved = *dev.report_buf_virt.add(1);
+                    let keycode = *dev.report_buf_virt.add(2);
 
-            // Re-arm keyboard transfer immediately
-            queue_keyboard_trb();
+                    // Re-arm EP1 transfer immediately
+                    queue_ep1_trb(dev);
 
-            if keycode != 0 && keycode != XHCI.prev_keycode {
-                XHCI.prev_keycode = keycode;
-                return hid_to_ascii(modifier, keycode);
-            } else if keycode == 0 {
-                XHCI.prev_keycode = 0;
+                    // Standard USB HID Boot Protocol Keyboard Report:
+                    // byte 0: modifier keys
+                    // byte 1: reserved (ALWAYS 0 in boot keyboard report!)
+                    // byte 2: keycode 1
+                    if reserved == 0 {
+                        if keycode != 0 && keycode != XHCI.prev_keycode {
+                            XHCI.prev_keycode = keycode;
+                            return hid_to_ascii(modifier, keycode);
+                        } else if keycode == 0 {
+                            XHCI.prev_keycode = 0;
+                        }
+                    }
+                    break;
+                }
             }
         }
         None
+    }
+}
+
+pub fn has_input() -> bool {
+    unsafe {
+        if !XHCI.initialized || XHCI.num_devices == 0 { return false; }
+        let ev_addr = XHCI.event_ring_virt.add(XHCI.event_dequeue_idx) as usize;
+        core::arch::asm!("dc ivac, {}", in(reg) ev_addr);
+        core::arch::asm!("dsb ish");
+        let ev = &*XHCI.event_ring_virt.add(XHCI.event_dequeue_idx);
+        let ctrl = ptr::read_volatile(&ev.control);
+        (ctrl & 1) == XHCI.event_cycle
     }
 }
 
@@ -685,7 +777,7 @@ fn hid_to_ascii(modifier: u8, keycode: u8) -> Option<u8> {
         }
         0x28 => Some(b'\n'), // Enter
         0x29 => Some(0x1B),  // Escape
-        0x2A => Some(0x08),  // Backspace
+        0x2A => Some(0x7F),  // Backspace (ASCII DEL 0x7F)
         0x2B => Some(b'\t'), // Tab
         0x2C => Some(b' '),  // Space
         0x2D => Some(if shift { b'_' } else { b'-' }), // - and _
@@ -708,9 +800,22 @@ fn hid_to_ascii(modifier: u8, keycode: u8) -> Option<u8> {
 // ─────────────────────────────────────────────────────────────
 
 fn find_xhci_base() -> usize {
-    // 1. Scan PCIe ECAM if available
-    let ecam_base = unsafe { crate::hal::acpi::ACPI_INFO.ecam_base };
-    if let Some(ecam) = ecam_base {
+    // 1. Scan PCIe ECAM if available from ACPI MCFG
+    let mut ecam_candidates = [0usize; 4];
+    let mut num_candidates = 0;
+
+    if let Some(ecam) = unsafe { crate::hal::acpi::ACPI_INFO.ecam_base } {
+        ecam_candidates[num_candidates] = ecam;
+        num_candidates += 1;
+    }
+    for &fb in &[0x40_1000_0000usize, 0x3F00_0000usize, 0x1000_0000usize] {
+        if num_candidates < 4 && !ecam_candidates[..num_candidates].contains(&fb) {
+            ecam_candidates[num_candidates] = fb;
+            num_candidates += 1;
+        }
+    }
+
+    for &ecam in &ecam_candidates[..num_candidates] {
         for bus in 0..4 {
             for dev in 0..32 {
                 for func in 0..8 {
@@ -732,7 +837,7 @@ fn find_xhci_base() -> usize {
                         if class == 0x0C && subclass == 0x03 && prog_if == 0x30 {
                             // Enable Memory Space (bit 1) and Bus Master (bit 2)
                             let cmd = ptr::read_volatile((dev_addr + 4) as *const u16);
-                            ptr::write_volatile((dev_addr + 4) as *mut u16, cmd | 0b110);
+                            ptr::write_volatile((dev_addr + 4) as *mut u16, cmd | 0b111);
 
                             let bar0 = ptr::read_volatile((dev_addr + 0x10) as *const u32);
                             let bar1 = ptr::read_volatile((dev_addr + 0x14) as *const u32);
@@ -753,6 +858,6 @@ fn find_xhci_base() -> usize {
         }
     }
 
-    // 2. Parallels Desktop Apple Silicon Known Physical MMIO Base
+    // 2. Parallels Desktop Apple Silicon Known Physical MMIO Base fallback
     0x0217_0000
 }
