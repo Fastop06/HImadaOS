@@ -151,13 +151,14 @@ pub fn get_installed_count() -> usize {
     }
 }
 
-pub fn get_active_mirror(buf: &mut [u8; 128]) -> &str {
+pub fn for_each_mirror<F: FnMut(&str) -> bool>(mut f: F) {
     let at_fdcwd: usize = (-100i64) as usize;
     let mlist_path = b"/etc/pacman.d/mirrorlist\0";
     let fd = crate::syscall3(crate::sys_nr::OPENAT, at_fdcwd, mlist_path.as_ptr() as usize, 0);
+    let mut matched_any = false;
     if fd != !0 && fd > 0 {
-        let mut mbuf = [0u8; 512];
-        let n = crate::syscall3(crate::sys_nr::READ, fd, mbuf.as_mut_ptr() as usize, 511);
+        let mut mbuf = [0u8; 1024];
+        let n = crate::syscall3(crate::sys_nr::READ, fd, mbuf.as_mut_ptr() as usize, 1023);
         crate::syscall1(crate::sys_nr::CLOSE, fd);
         if n > 0 && n != !0 {
             if let Ok(mcontent) = core::str::from_utf8(&mbuf[..n]) {
@@ -169,31 +170,10 @@ pub fn get_active_mirror(buf: &mut [u8; 128]) -> &str {
                         } else {
                             trimmed["Server=".len()..].trim()
                         };
-                        let arch = "aarch64";
-                        let repo = "core";
-                        let mut cur = 0;
-                        let ub = url.as_bytes();
-                        let mut idx = 0;
-                        while idx < ub.len() && cur < 127 {
-                            if idx + 5 <= ub.len() && &ub[idx..idx+5] == b"$arch" {
-                                let c = arch.len().min(127 - cur);
-                                buf[cur..cur+c].copy_from_slice(&arch.as_bytes()[..c]);
-                                cur += c;
-                                idx += 5;
-                            } else if idx + 5 <= ub.len() && &ub[idx..idx+5] == b"$repo" {
-                                let c = repo.len().min(127 - cur);
-                                buf[cur..cur+c].copy_from_slice(&repo.as_bytes()[..c]);
-                                cur += c;
-                                idx += 5;
-                            } else {
-                                buf[cur] = ub[idx];
-                                cur += 1;
-                                idx += 1;
-                            }
-                        }
-                        if cur > 0 {
-                            if let Ok(res) = core::str::from_utf8(&buf[..cur]) {
-                                return res;
+                        if !url.is_empty() {
+                            matched_any = true;
+                            if f(url) {
+                                return;
                             }
                         }
                     }
@@ -201,8 +181,58 @@ pub fn get_active_mirror(buf: &mut [u8; 128]) -> &str {
             }
         }
     }
-    "http://mirror.archlinuxarm.org/aarch64/core"
+
+    if !matched_any {
+        let fallbacks = [
+            "http://fl.us.mirror.archlinuxarm.org/$arch/$repo",
+            "http://nj.us.mirror.archlinuxarm.org/$arch/$repo",
+            "http://mirror.archlinuxarm.org/$arch/$repo",
+        ];
+        for &fb in &fallbacks {
+            if f(fb) {
+                return;
+            }
+        }
+    }
 }
+
+pub fn get_active_mirror<'a>(buf: &'a mut [u8; 128]) -> &'a str {
+    let mut chosen_len = 0;
+    for_each_mirror(|tmpl| {
+        let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+        let repo = "core";
+        let mut cur = 0;
+        let ub = tmpl.as_bytes();
+        let mut idx = 0;
+        while idx < ub.len() && cur < 127 {
+            if idx + 5 <= ub.len() && &ub[idx..idx+5] == b"$arch" {
+                let c = arch.len().min(127 - cur);
+                buf[cur..cur+c].copy_from_slice(&arch.as_bytes()[..c]);
+                cur += c;
+                idx += 5;
+            } else if idx + 5 <= ub.len() && &ub[idx..idx+5] == b"$repo" {
+                let c = repo.len().min(127 - cur);
+                buf[cur..cur+c].copy_from_slice(&repo.as_bytes()[..c]);
+                cur += c;
+                idx += 5;
+            } else {
+                buf[cur] = ub[idx];
+                cur += 1;
+                idx += 1;
+            }
+        }
+        chosen_len = cur;
+        true // stop on first mirror
+    });
+
+    if chosen_len > 0 {
+        if let Ok(res) = core::str::from_utf8(&buf[..chosen_len]) {
+            return res;
+        }
+    }
+    "http://fl.us.mirror.archlinuxarm.org/aarch64/core"
+}
+
 
 pub fn extract_tar_archive(tar_path: &str) -> bool {
     let extractor_path = b"/bin/himada-pkg-extract\0";
@@ -517,14 +547,7 @@ pub fn is_package_installed(target: &str) -> bool {
 
 pub fn find_or_register_package(target: &str) -> Option<(usize, bool)> {
     unsafe {
-        // 1. Check REPO_PACKAGES
-        for (idx, p) in REPO_PACKAGES.iter().enumerate() {
-            if p.name == target {
-                return Some((idx, true));
-            }
-        }
-
-        // 2. Check existing DYN_PACKAGES
+        // 1. Check existing DYN_PACKAGES
         for (idx, dp) in DYN_PACKAGES.iter().enumerate() {
             if dp.valid {
                 let nl = dp.name.iter().position(|&b| b == 0).unwrap_or(dp.name.len());
@@ -536,7 +559,7 @@ pub fn find_or_register_package(target: &str) -> Option<(usize, bool)> {
             }
         }
 
-        // 3. Lookup in /var/lib/pacman/sync/packages.idx
+        // 2. Lookup in /var/lib/pacman/sync/packages.idx
         let mut temp_dp = DynamicPackageInfo {
             name: [0; 32],
             version: [0; 24],
@@ -549,6 +572,12 @@ pub fn find_or_register_package(target: &str) -> Option<(usize, bool)> {
         };
 
         if lookup_package_in_index(target, &mut temp_dp) {
+            for p in REPO_PACKAGES.iter() {
+                if p.name == target && p.installed {
+                    temp_dp.installed = true;
+                    break;
+                }
+            }
             for (idx, dp) in DYN_PACKAGES.iter_mut().enumerate() {
                 if !dp.valid {
                     *dp = temp_dp;
@@ -557,6 +586,13 @@ pub fn find_or_register_package(target: &str) -> Option<(usize, bool)> {
             }
             DYN_PACKAGES[0] = temp_dp;
             return Some((0, false));
+        }
+
+        // 3. Fallback to REPO_PACKAGES if not found in index
+        for (idx, p) in REPO_PACKAGES.iter().enumerate() {
+            if p.name == target {
+                return Some((idx, true));
+            }
         }
 
         // 4. Check sync database directories (core and extra)
@@ -1213,7 +1249,7 @@ pub fn install_package_payload(name: &str, version: &str) -> bool {
     cand5[l5..l5+4].copy_from_slice(b".bin"); l5 += 4;
     let cand5_str = core::str::from_utf8(&cand5[..l5]).unwrap_or("");
 
-    for &cand in &[cand0_str, cand0b_str, cand1_str, cand2_str, cand3_str, cand4_str, cand5_str] {
+    for &cand in &[cand0_str, cand0b_str] {
         if !cand.is_empty() && crate::file_exists_on_disk(cand) {
             if extract_tar_archive(cand) {
                 return true;
@@ -1224,58 +1260,79 @@ pub fn install_package_payload(name: &str, version: &str) -> bool {
         }
     }
 
-    // Try official mirror download
-    let mut mbuf = [0u8; 128];
-    let mirror = get_active_mirror(&mut mbuf);
-    let mut url_buf = [0u8; 256];
-    let mut ulen = 0;
-
-    let base_mirror = if let Some(idx) = mirror.find("/aarch64/") {
-        &mirror[..idx + "/aarch64/".len()]
-    } else if let Some(idx) = mirror.find("/$repo") {
-        &mirror[..idx]
-    } else {
-        "http://mirror.archlinuxarm.org/aarch64/"
-    };
-
-    let bb = base_mirror.as_bytes();
-    let bl = bb.len().min(128);
-    url_buf[..bl].copy_from_slice(&bb[..bl]); ulen += bl;
-    if !base_mirror.ends_with('/') {
-        url_buf[ulen] = b'/'; ulen += 1;
-    }
-
-    let rb = pkg_repo.as_bytes();
-    let rl = rb.len().min(16);
-    url_buf[ulen..ulen+rl].copy_from_slice(&rb[..rl]); ulen += rl;
-    url_buf[ulen] = b'/'; ulen += 1;
-
+    // Try official mirrors with failover
     let file_to_fetch = if !pkg_filename.is_empty() {
         pkg_filename
     } else {
         name
     };
 
-    let fb = file_to_fetch.as_bytes();
-    let fl = fb.len().min(256 - ulen);
-    url_buf[ulen..ulen+fl].copy_from_slice(&fb[..fl]); ulen += fl;
+    let mut download_success = false;
 
-    if let Ok(url_str) = core::str::from_utf8(&url_buf[..ulen]) {
-        let mut cache_path = [0u8; 128];
-        let cpfx = b"/var/cache/pacman/pkg/";
-        cache_path[..cpfx.len()].copy_from_slice(cpfx);
-        let mut cl = cpfx.len();
-        cache_path[cl..cl+fl].copy_from_slice(&fb[..fl]); cl += fl;
-        if let Ok(cpath_str) = core::str::from_utf8(&cache_path[..cl]) {
-            if crate::http_download_to_file(url_str, cpath_str) {
-                if extract_tar_archive(cpath_str) {
-                    return true;
-                } else if copy_package_file(cpath_str, dest_usr_str) {
-                    copy_package_file(cpath_str, dest_bin_str);
-                    return true;
+    for_each_mirror(|mirror_tmpl| {
+        let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+        let repo = pkg_repo;
+        let mut base_buf = [0u8; 128];
+        let mut blen = 0;
+        let mb = mirror_tmpl.as_bytes();
+        let mut mi = 0;
+        while mi < mb.len() && blen < 127 {
+            if mi + 5 <= mb.len() && &mb[mi..mi+5] == b"$arch" {
+                let c = arch.len().min(127 - blen);
+                base_buf[blen..blen+c].copy_from_slice(&arch.as_bytes()[..c]);
+                blen += c;
+                mi += 5;
+            } else if mi + 5 <= mb.len() && &mb[mi..mi+5] == b"$repo" {
+                let c = repo.len().min(127 - blen);
+                base_buf[blen..blen+c].copy_from_slice(&repo.as_bytes()[..c]);
+                blen += c;
+                mi += 5;
+            } else {
+                base_buf[blen] = mb[mi];
+                blen += 1;
+                mi += 1;
+            }
+        }
+        let base_str = core::str::from_utf8(&base_buf[..blen]).unwrap_or("");
+        if base_str.is_empty() { return false; }
+
+        let mut url_buf = [0u8; 256];
+        let mut ulen = 0;
+        let bsb = base_str.as_bytes();
+        let bsl = bsb.len().min(180);
+        url_buf[..bsl].copy_from_slice(&bsb[..bsl]); ulen += bsl;
+        if !base_str.ends_with('/') {
+            url_buf[ulen] = b'/'; ulen += 1;
+        }
+
+        let fb = file_to_fetch.as_bytes();
+        let fl = fb.len().min(256 - ulen);
+        url_buf[ulen..ulen+fl].copy_from_slice(&fb[..fl]); ulen += fl;
+
+        if let Ok(url_str) = core::str::from_utf8(&url_buf[..ulen]) {
+            let mut cache_path = [0u8; 128];
+            let cpfx = b"/var/cache/pacman/pkg/";
+            cache_path[..cpfx.len()].copy_from_slice(cpfx);
+            let mut cl = cpfx.len();
+            cache_path[cl..cl+fl].copy_from_slice(&fb[..fl]); cl += fl;
+            if let Ok(cpath_str) = core::str::from_utf8(&cache_path[..cl]) {
+                if crate::http_download_to_file(url_str, cpath_str) {
+                    if extract_tar_archive(cpath_str) {
+                        download_success = true;
+                        return true; // Stop mirror loop on success
+                    } else if copy_package_file(cpath_str, dest_usr_str) {
+                        copy_package_file(cpath_str, dest_bin_str);
+                        download_success = true;
+                        return true;
+                    }
                 }
             }
         }
+        false // Try next mirror
+    });
+
+    if download_success {
+        return true;
     }
 
     false
@@ -1509,7 +1566,21 @@ fn install_packages<F: FnMut(&str)>(targets: &[&str], noconfirm: bool, print_fn:
             db_dir[cur..cur+5].copy_from_slice(b"/desc");
             cur += 5;
             if let Ok(desc_path) = core::str::from_utf8(&db_dir[..cur]) {
-                write_disk_file(desc_path, b"%NAME%\n");
+                let mut desc_buf = [0u8; 256];
+                let mut dcur = 0;
+                let append_d = |buf: &mut [u8; 256], dcur: &mut usize, s: &str| {
+                    let b = s.as_bytes();
+                    let rem = 256 - *dcur;
+                    let c = b.len().min(rem);
+                    buf[*dcur..*dcur+c].copy_from_slice(&b[..c]);
+                    *dcur += c;
+                };
+                append_d(&mut desc_buf, &mut dcur, "%NAME%\n");
+                append_d(&mut desc_buf, &mut dcur, pkg_name);
+                append_d(&mut desc_buf, &mut dcur, "\n\n%VERSION%\n");
+                append_d(&mut desc_buf, &mut dcur, pkg_version);
+                append_d(&mut desc_buf, &mut dcur, "\n\n%DESC%\nOfficial Arch package\n");
+                write_disk_file(desc_path, &desc_buf[..dcur]);
             }
         }
 

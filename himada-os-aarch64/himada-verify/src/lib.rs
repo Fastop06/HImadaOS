@@ -119,6 +119,80 @@ pub fn grep_contains(line: &[u8], pat: &[u8], case_insens: bool) -> bool {
     false
 }
 
+// ─────────────────────────────────────────────────────────────
+// Mirror URL Parsing Model for Pacman
+// ─────────────────────────────────────────────────────────────
+pub fn parse_mirror_url(tmpl: &str, arch: &str, repo: &str, out: &mut [u8; 128]) -> usize {
+    let mut cur = 0;
+    let mb = tmpl.as_bytes();
+    let mut mi = 0;
+    while mi < mb.len() && cur < 127 {
+        if mi + 5 <= mb.len() && &mb[mi..mi+5] == b"$arch" {
+            let c = arch.len().min(127 - cur);
+            out[cur..cur+c].copy_from_slice(&arch.as_bytes()[..c]);
+            cur += c;
+            mi += 5;
+        } else if mi + 5 <= mb.len() && &mb[mi..mi+5] == b"$repo" {
+            let c = repo.len().min(127 - cur);
+            out[cur..cur+c].copy_from_slice(&repo.as_bytes()[..c]);
+            cur += c;
+            mi += 5;
+        } else {
+            out[cur] = mb[mi];
+            cur += 1;
+            mi += 1;
+        }
+    }
+    cur
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pacman Index Line Parsing Model
+// ─────────────────────────────────────────────────────────────
+pub fn parse_pacman_index_line(line: &[u8], out_name: &mut [u8; 32], out_file: &mut [u8; 64]) -> bool {
+    let mut part = 0;
+    let mut nlen = 0;
+    let mut flen = 0;
+    for &b in line {
+        if b == b'|' {
+            part += 1;
+            continue;
+        }
+        if part == 0 && nlen < 31 {
+            out_name[nlen] = b;
+            nlen += 1;
+        } else if part == 3 && flen < 63 {
+            out_file[flen] = b;
+            flen += 1;
+        }
+    }
+    out_name[nlen] = 0;
+    out_file[flen] = 0;
+    part >= 3 && nlen > 0
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP Redirect Bound Model
+// ─────────────────────────────────────────────────────────────
+pub fn redirect_step(count: usize, max_redirects: usize) -> Option<usize> {
+    if count >= max_redirects {
+        None
+    } else {
+        Some(count + 1)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ELF Segment Invariants Model
+// ─────────────────────────────────────────────────────────────
+pub fn check_elf_segment_bounds(vaddr: u64, memsz: u64, max_addr: u64) -> bool {
+    if let Some(end) = vaddr.checked_add(memsz) {
+        end <= max_addr
+    } else {
+        false
+    }
+}
+
 #[cfg(kani)]
 mod tests {
     use super::*;
@@ -196,8 +270,60 @@ mod tests {
 
         let case_insens: bool = kani::any();
 
-        // Kani verifies that NO out-of-bounds access, panic, or underflow can ever occur:
         let _ = grep_contains(&line[..line_len], &pat[..pat_len], case_insens);
     }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn verify_mirror_url_parse_safety() {
+        let tmpl_len: usize = kani::any();
+        kani::assume(tmpl_len <= 15);
+        let mut tmpl_buf = [0u8; 15];
+        for i in 0..tmpl_len { tmpl_buf[i] = kani::any(); }
+
+        if let Ok(tmpl) = core::str::from_utf8(&tmpl_buf[..tmpl_len]) {
+            let mut out = [0u8; 128];
+            let len = parse_mirror_url(tmpl, "aarch64", "extra", &mut out);
+            assert!(len <= 127);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn verify_pacman_index_delimiter_safety() {
+        let line_len: usize = kani::any();
+        kani::assume(line_len <= 18);
+        let mut line_buf = [0u8; 18];
+        for i in 0..line_len { line_buf[i] = kani::any(); }
+
+        let mut out_name = [0u8; 32];
+        let mut out_file = [0u8; 64];
+        let _ = parse_pacman_index_line(&line_buf[..line_len], &mut out_name, &mut out_file);
+    }
+
+    #[kani::proof]
+    fn verify_redirect_termination() {
+        let count: usize = kani::any();
+        let max_red: usize = 3;
+        let next = redirect_step(count, max_red);
+        if count >= max_red {
+            assert!(next.is_none());
+        } else {
+            assert_eq!(next, Some(count + 1));
+        }
+    }
+
+    #[kani::proof]
+    fn verify_elf_segment_bounds_safety() {
+        let vaddr: u64 = kani::any();
+        let memsz: u64 = kani::any();
+        let max_addr: u64 = 0x8000_0000_0000;
+        let ok = check_elf_segment_bounds(vaddr, memsz, max_addr);
+        if ok {
+            assert!(vaddr <= max_addr);
+            assert!(vaddr + memsz <= max_addr);
+        }
+    }
 }
+
 

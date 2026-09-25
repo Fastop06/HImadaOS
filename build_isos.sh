@@ -54,7 +54,6 @@ cat << 'MIRRORS' > initramfs/etc/pacman.d/mirrorlist
 Server = http://fl.us.mirror.archlinuxarm.org/$arch/$repo
 Server = http://nj.us.mirror.archlinuxarm.org/$arch/$repo
 Server = http://mirror.archlinuxarm.org/$arch/$repo
-Server = http://10.0.2.2:8080/packages
 MIRRORS
 
 # Official Arch Linux ARM sync database
@@ -303,19 +302,16 @@ cp "$SCRATCH/himada-pkg-extract/target/aarch64-unknown-linux-musl/release/himada
 cp "$SCRATCH/himada-pkg-extract/target/aarch64-unknown-linux-musl/release/himada-pkg-extract" initramfs/bin/tar
 chmod +x initramfs/bin/himada-pkg-extract initramfs/usr/bin/himada-pkg-extract initramfs/bin/tar
 
-# Populate package repository and cache with REAL official packages
+# Initialize empty package cache and repo (packages will be fetched live over HTTP from official mirrors)
 mkdir -p initramfs/var/cache/pacman/pkg initramfs/repo
-if [ -d "$SCRATCH/pkg_mirror/packages" ]; then
-  cp "$SCRATCH/pkg_mirror/packages"/* initramfs/var/cache/pacman/pkg/ 2>/dev/null || true
-  cp "$SCRATCH/pkg_mirror/packages"/* initramfs/repo/ 2>/dev/null || true
-fi
+
 
 
 # Populate Glibc runtime libraries and dynamic linker for ARM64 (dereference symlinks with -RL)
 if [ -d "$SCRATCH/glibc_runtime" ]; then
   mkdir -p initramfs/lib initramfs/usr/lib initramfs/usr/share initramfs/etc
   cp -RL "$SCRATCH/glibc_runtime/lib"/* initramfs/lib/ 2>/dev/null || true
-  cp -RL "$SCRATCH/glibc_runtime/usr/lib"/* initramfs/usr/lib/ 2>/dev/null || true
+  rm -f initramfs/lib/*.a initramfs/lib/*.o
   if [ -d "$SCRATCH/glibc_runtime/usr/share/terminfo" ]; then
     mkdir -p initramfs/usr/share/terminfo initramfs/etc/terminfo
     cp -RL "$SCRATCH/glibc_runtime/usr/share/terminfo"/* initramfs/usr/share/terminfo/ 2>/dev/null || true
@@ -326,7 +322,7 @@ if [ -d "$SCRATCH/glibc_runtime" ]; then
     cp "$SCRATCH/glibc_runtime/bin/glibc_test" initramfs/bin/glibc_test
     chmod +x initramfs/bin/glibc_test
   fi
-  chmod +x initramfs/lib/* initramfs/usr/lib/* 2>/dev/null || true
+  chmod +x initramfs/lib/* 2>/dev/null || true
 fi
 
 chmod +x initramfs/bin/* initramfs/usr/bin/*
