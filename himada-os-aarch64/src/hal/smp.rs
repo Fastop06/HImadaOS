@@ -176,9 +176,15 @@ pub unsafe extern "C" fn secondary_cpu_entry(info: &limine::mp::MpInfo) -> ! {
         mpidr
     );
 
-    // Switch to dedicated CPU boot stack before entering idle loop
+    // Switch to dedicated CPU boot stack before entering idle loop (configure SP_EL1 and SP_EL0)
     let stack_top = (CPU_BOOT_STACKS[cpu_id].0.as_mut_ptr() as usize) + CPU_STACK_SIZE;
-    core::arch::asm!("mov sp, {}", in(reg) stack_top);
+    core::arch::asm!(
+        "msr spsel, #1",
+        "mov sp, {0}",
+        "msr sp_el0, {0}",
+        "isb",
+        in(reg) stack_top
+    );
 
     // 6. Enter secondary scheduling loop
     secondary_cpu_loop(cpu_id);

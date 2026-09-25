@@ -468,7 +468,6 @@ fn sys_read(fd: u64, buf: u64, count: u64) -> u64 {
                 return read_from_desc(desc, buf, count);
             }
         }
-        crate::net::socket::poll();
         // 1. Check USB HID Keyboard via xHCI (Parallels Desktop Apple Silicon & QEMU)
         if let Some(ch) = crate::hal::xhci::poll_keyboard() {
             unsafe { *(buf as *mut u8) = ch; }
@@ -1707,11 +1706,21 @@ fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
         let mut start: u64 = 0;
         unsafe { core::arch::asm!("mrs {0}, cntvct_el0", out(reg) start); }
         let mut now = start;
+        let mut last_poll = start;
+        let poll_interval = freq / 100; // Poll network at most every 10ms
+
         while now.saturating_sub(start) < total_ticks {
-            crate::net::socket::poll();
+            if now.saturating_sub(last_poll) >= poll_interval {
+                crate::net::socket::poll();
+                last_poll = now;
+            }
             crate::sys::process::schedule();
-            core::hint::spin_loop();
-            unsafe { core::arch::asm!("mrs {0}, cntvct_el0", out(reg) now); }
+            for _ in 0..1_000 {
+                core::hint::spin_loop();
+            }
+            unsafe {
+                core::arch::asm!("mrs {0}, cntvct_el0", out(reg) now);
+            }
         }
     }
     0

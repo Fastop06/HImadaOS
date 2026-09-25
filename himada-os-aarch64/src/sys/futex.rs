@@ -187,6 +187,7 @@ pub fn futex_wake(uaddr: u64, count: u32, bitset: u32) -> u64 {
             if let Some(proc) = pm.get_process_mut(tid) {
                 if proc.state == crate::sys::process::ProcessState::Blocked {
                     proc.state = crate::sys::process::ProcessState::Ready;
+                    crate::sys::process::READY_TASKS_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
                 }
             }
         }
@@ -227,6 +228,7 @@ pub fn sys_futex(
                     if let Some(proc) = pm.get_process_mut(tid) {
                         if proc.state == crate::sys::process::ProcessState::Blocked {
                             proc.state = crate::sys::process::ProcessState::Ready;
+                            crate::sys::process::READY_TASKS_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
                         }
                     }
                 }
@@ -257,6 +259,7 @@ pub fn sys_futex(
                     if let Some(proc) = pm.get_process_mut(tid) {
                         if proc.state == crate::sys::process::ProcessState::Blocked {
                             proc.state = crate::sys::process::ProcessState::Ready;
+                            crate::sys::process::READY_TASKS_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
                         }
                     }
                 }

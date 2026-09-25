@@ -130,6 +130,7 @@ impl Process {
 
         // Set default SP to top of kernel stack
         proc.cpu_context.sp = kstack_top as u64;
+        READY_TASKS_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
         proc
     }
 
@@ -201,21 +202,28 @@ pub static mut PER_CPU_IDLE_CONTEXT: [CpuContext; crate::hal::smp::MAX_CPUS] = [
     CpuContext { x19: 0, x20: 0, x21: 0, x22: 0, x23: 0, x24: 0, x25: 0, x26: 0, x27: 0, x28: 0, x29: 0, x30: 0, sp: 0 },
 ];
 
+pub static READY_TASKS_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 #[no_mangle]
 pub extern "C" fn cpu_idle_entry() -> ! {
+    let cpu = crate::hal::smp::current_cpu_id();
     loop {
-        // Poll network stack
-        crate::net::socket::poll();
-
-        // Attempt to run any ready threads
-        schedule();
-
-        // Power-efficient sleep and backoff to avoid bus & spinlock contention
-        for _ in 0..10_000 {
-            core::hint::spin_loop();
-        }
-        unsafe {
-            core::arch::asm!("wfe");
+        // Only CPU 0 polls network during idle to avoid bus contention across cores
+        if cpu == 0 {
+            crate::net::socket::poll();
+            schedule();
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
+            }
+        } else {
+            // Secondary cores: do not touch scheduler lock unless ready tasks exist
+            if READY_TASKS_COUNT.load(core::sync::atomic::Ordering::Acquire) > 0 {
+                schedule();
+            } else {
+                for _ in 0..100_000 {
+                    core::hint::spin_loop();
+                }
+            }
         }
     }
 }
@@ -426,6 +434,8 @@ pub fn schedule() {
         let prev_proc = pm.procs[c_idx].as_mut().unwrap();
         if prev_proc.state == ProcessState::Running {
             prev_proc.state = ProcessState::Ready;
+            READY_TASKS_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
+            unsafe { core::arch::asm!("sev"); }
             // NOTE: Do NOT set prev_proc.running_cpu here! It remains `cpu as i32`
             // until cpu_switch_to completes saving and switching stack on this core.
         }
@@ -445,6 +455,7 @@ pub fn schedule() {
 
     let next_proc = pm.procs[next_idx].as_mut().unwrap();
     next_proc.state = ProcessState::Running;
+    READY_TASKS_COUNT.fetch_sub(1, core::sync::atomic::Ordering::Release);
     next_proc.running_cpu.store(cpu as i32, core::sync::atomic::Ordering::Release);
     let next_pid = next_proc.pid;
     let next_ttbr0 = next_proc.ttbr0;
