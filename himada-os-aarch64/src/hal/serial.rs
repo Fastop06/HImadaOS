@@ -38,6 +38,13 @@ pub fn init(fdt_vaddr: usize) {
             return;
         }
     }
+
+    // Guaranteed fallback: QEMU ARM virt machine PL011 UART is always at 0x09000000
+    unsafe {
+        crate::mm::vmm::map_device_page(0x09000000, 0x09000000);
+        UART_BASE = 0x09000000;
+        UART_MAPPED = true;
+    }
 }
 
 pub fn has_byte() -> bool {
@@ -69,14 +76,11 @@ pub fn write_byte(ch: u8) {
         let uart_fr = (UART_BASE + 0x18) as *const u32;
         let uart_dr = UART_BASE as *mut u32;
         // FR bit 5 is TXFF (Transmit FIFO Full)
-        let mut timeout = 2_000;
-        while (core::ptr::read_volatile(uart_fr) & 0x20) != 0 && timeout > 0 {
-            timeout -= 1;
+        // Wait until FIFO is ready for the byte. In QEMU, the host drains this almost instantaneously.
+        let mut retries = 10_000_000;
+        while (core::ptr::read_volatile(uart_fr) & 0x20) != 0 && retries > 0 {
+            retries -= 1;
             core::hint::spin_loop();
-        }
-        if timeout == 0 {
-            // Buffer full; drop character rather than permanently disabling console mapping!
-            return;
         }
         core::ptr::write_volatile(uart_dr, ch as u32);
     }

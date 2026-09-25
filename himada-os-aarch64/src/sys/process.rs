@@ -131,6 +131,7 @@ impl Process {
         // Set default SP to top of kernel stack
         proc.cpu_context.sp = kstack_top as u64;
         READY_TASKS_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
+        unsafe { core::arch::asm!("sev"); }
         proc
     }
 
@@ -220,8 +221,8 @@ pub extern "C" fn cpu_idle_entry() -> ! {
             if READY_TASKS_COUNT.load(core::sync::atomic::Ordering::Acquire) > 0 {
                 schedule();
             } else {
-                for _ in 0..100_000 {
-                    core::hint::spin_loop();
+                unsafe {
+                    core::arch::asm!("wfe");
                 }
             }
         }
