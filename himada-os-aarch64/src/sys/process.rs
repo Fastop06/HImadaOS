@@ -65,7 +65,7 @@ pub struct Process {
     pub is_thread: bool,     // True if sharing address space (POSIX thread)
     pub clear_child_tid: u64,// CLONE_CHILD_CLEARTID address for futex wake on thread exit
     pub tls: u64,            // User TLS base register (TPIDR_EL0)
-    pub running_cpu: Option<usize>, // Which CPU core is currently running this thread
+    pub running_cpu: core::sync::atomic::AtomicI32, // -1 = None, 0..MAX_CPUS = active CPU core
     pub kstack: usize,
     pub kstack_top: usize,
     pub ustack_top: usize,
@@ -111,7 +111,7 @@ impl Process {
             is_thread: false,
             clear_child_tid: 0,
             tls: 0,
-            running_cpu: None,
+            running_cpu: core::sync::atomic::AtomicI32::new(-1),
             kstack: kstack_virt,
             kstack_top,
             ustack_top: 0,
@@ -210,7 +210,10 @@ pub extern "C" fn cpu_idle_entry() -> ! {
         // Attempt to run any ready threads
         schedule();
 
-        // Power-efficient sleep until next event / interrupt
+        // Power-efficient sleep and backoff to avoid bus & spinlock contention
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
         unsafe {
             core::arch::asm!("wfe");
         }
@@ -239,6 +242,7 @@ r#"
 cpu_switch_to:
     // x0: *mut CpuContext (prev)
     // x1: *const CpuContext (next)
+    // x2: *mut i32 (prev_running_cpu flag, or NULL)
 
     // 1. Save callee-saved registers of prev
     stp x19, x20, [x0, #0]
@@ -247,8 +251,8 @@ cpu_switch_to:
     stp x25, x26, [x0, #48]
     stp x27, x28, [x0, #64]
     stp x29, x30, [x0, #80]
-    mov x2, sp
-    str x2, [x0, #96]
+    mov x3, sp
+    str x3, [x0, #96]
 
     // 2. Restore callee-saved registers of next
     ldp x19, x20, [x1, #0]
@@ -257,10 +261,17 @@ cpu_switch_to:
     ldp x25, x26, [x1, #48]
     ldp x27, x28, [x1, #64]
     ldp x29, x30, [x1, #80]
-    ldr x2, [x1, #96]
-    mov sp, x2
+    ldr x3, [x1, #96]
+    mov sp, x3
 
-    // Return to the address stored in next.x30 (lr)
+    // 3. Atomically release prev_running_cpu ONLY after prev's context and stack are fully saved
+    dmb ish
+    cbz x2, 1f
+    mov w4, #-1
+    str w4, [x2]
+    dmb ish
+1:
+    // Return to next.x30
     ret
 
 .global save_fpu_context
@@ -347,7 +358,7 @@ return_from_fork_trampoline:
 );
 
 extern "C" {
-    pub fn cpu_switch_to(prev: *mut CpuContext, next: *const CpuContext);
+    pub fn cpu_switch_to(prev: *mut CpuContext, next: *const CpuContext, prev_rcpu: *mut i32);
     pub fn save_fpu_context(ctx: *mut FpuContext);
     pub fn restore_fpu_context(ctx: *const FpuContext);
     pub fn return_from_fork_trampoline();
@@ -373,7 +384,8 @@ pub fn schedule() {
     for offset in 0..MAX_PROCS {
         let idx = (start + offset) % MAX_PROCS;
         if let Some(ref p) = pm.procs[idx] {
-            if p.state == ProcessState::Ready && (p.running_cpu.is_none() || p.running_cpu == Some(cpu)) {
+            let rcpu = p.running_cpu.load(core::sync::atomic::Ordering::Acquire);
+            if p.state == ProcessState::Ready && (rcpu == -1 || rcpu == cpu as i32) {
                 next_idx = Some(idx);
                 break;
             }
@@ -392,11 +404,11 @@ pub fn schedule() {
                 pm.current_pid = 0;
             }
             let prev_proc = pm.procs[c_idx].as_mut().unwrap();
-            prev_proc.running_cpu = None;
             let prev_ctx_ptr = &mut prev_proc.cpu_context as *mut CpuContext;
+            let prev_rcpu_ptr = &prev_proc.running_cpu as *const core::sync::atomic::AtomicI32 as *mut i32;
             drop(pm);
             unsafe {
-                cpu_switch_to(prev_ctx_ptr, &PER_CPU_IDLE_CONTEXT[cpu] as *const CpuContext);
+                cpu_switch_to(prev_ctx_ptr, &PER_CPU_IDLE_CONTEXT[cpu] as *const CpuContext, prev_rcpu_ptr);
             }
             return;
         }
@@ -410,30 +422,39 @@ pub fn schedule() {
     }
 
     // Prepare context pointers
-    let (prev_ctx_ptr, prev_fpu_ptr) = if let Some(c_idx) = cur_idx {
+    let (prev_ctx_ptr, prev_fpu_ptr, prev_rcpu_ptr) = if let Some(c_idx) = cur_idx {
         let prev_proc = pm.procs[c_idx].as_mut().unwrap();
         if prev_proc.state == ProcessState::Running {
             prev_proc.state = ProcessState::Ready;
-            prev_proc.running_cpu = None;
+            // NOTE: Do NOT set prev_proc.running_cpu here! It remains `cpu as i32`
+            // until cpu_switch_to completes saving and switching stack on this core.
         }
         prev_proc.fd_table = crate::sys::linux_abi::get_fd_table();
         (
             &mut prev_proc.cpu_context as *mut CpuContext,
             &mut prev_proc.fpu_context as *mut FpuContext,
+            &prev_proc.running_cpu as *const core::sync::atomic::AtomicI32 as *mut i32,
         )
     } else {
         (
             unsafe { &mut PER_CPU_IDLE_CONTEXT[cpu] as *mut CpuContext },
+            core::ptr::null_mut(),
             core::ptr::null_mut(),
         )
     };
 
     let next_proc = pm.procs[next_idx].as_mut().unwrap();
     next_proc.state = ProcessState::Running;
-    next_proc.running_cpu = Some(cpu);
+    next_proc.running_cpu.store(cpu as i32, core::sync::atomic::Ordering::Release);
     let next_pid = next_proc.pid;
     let next_ttbr0 = next_proc.ttbr0;
     let next_tls = next_proc.tls;
+
+    // Safety guard: ensure next process has a valid return address
+    if next_proc.cpu_context.x30 == 0 {
+        next_proc.cpu_context.x30 = return_from_fork_trampoline as *const () as usize as u64;
+    }
+
     let next_ctx_ptr = &next_proc.cpu_context as *const CpuContext;
     let next_fpu_ptr = &next_proc.fpu_context as *const FpuContext;
     let next_fd_table = next_proc.fd_table.clone();
@@ -473,7 +494,7 @@ pub fn schedule() {
             core::arch::asm!("msr tpidr_el0, {}", in(reg) next_tls);
         }
 
-        // Switch CPU registers & stack
-        cpu_switch_to(prev_ctx_ptr, next_ctx_ptr);
+        // Switch CPU registers & stack, and atomically release prev
+        cpu_switch_to(prev_ctx_ptr, next_ctx_ptr, prev_rcpu_ptr);
     }
 }

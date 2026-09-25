@@ -156,7 +156,6 @@ pub fn futex_wait(uaddr: u64, val: u32, _timeout_ptr: u64, bitset: u32) -> u64 {
         let mut pm = crate::sys::process::PROCESS_MANAGER.lock();
         if let Some(proc) = pm.get_process_mut(cur_tid) {
             proc.state = crate::sys::process::ProcessState::Blocked;
-            proc.running_cpu = None;
         }
     }
 

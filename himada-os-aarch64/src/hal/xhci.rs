@@ -487,9 +487,10 @@ pub fn init() {
             for _ in 0..10_000 { core::hint::spin_loop(); }
 
             // Probe Configuration Descriptor to detect Interface Class and Protocol
-            let mut is_keyboard = true;
+            let mut is_keyboard = false;
             if send_ep0_get_descriptor(&mut dev, desc_buf_phys, desc_buf_virt, 2, 0, 64) {
-                let total_len = (*desc_buf_virt as usize).min(64);
+                let w_total = (*desc_buf_virt.add(2) as usize) | ((*desc_buf_virt.add(3) as usize) << 8);
+                let total_len = w_total.min(64);
                 let mut offset = 0;
                 while offset + 2 <= total_len {
                     let b_len = *desc_buf_virt.add(offset) as usize;
@@ -499,12 +500,12 @@ pub fn init() {
                         let iface_class = *desc_buf_virt.add(offset + 5);
                         let iface_proto = *desc_buf_virt.add(offset + 7);
                         if iface_class == 3 {
-                            if iface_proto == 2 {
-                                is_keyboard = false;
-                                serial_println!("[xHCI] Slot {} identified as USB Mouse/Tablet (proto=2).", slot_id);
-                            } else if iface_proto == 1 {
+                            if iface_proto == 1 {
                                 is_keyboard = true;
                                 serial_println!("[xHCI] Slot {} confirmed as USB Boot Keyboard (proto=1).", slot_id);
+                            } else {
+                                is_keyboard = false;
+                                serial_println!("[xHCI] Slot {} identified as non-keyboard HID (proto={}).", slot_id, iface_proto);
                             }
                         }
                         break;
@@ -512,10 +513,13 @@ pub fn init() {
                     offset += b_len;
                 }
             } else {
-                // Parallels Desktop Apple Silicon fallback: Port 2 is Mouse/Tablet, Port 1 is Keyboard
-                if port == 2 {
+                // Fallback: Port 1 is Keyboard, others are not
+                if port == 1 {
+                    is_keyboard = true;
+                    serial_println!("[xHCI] Port 1 assumed USB Keyboard by fallback.");
+                } else {
                     is_keyboard = false;
-                    serial_println!("[xHCI] Port 2 assumed USB Mouse/Tablet under Parallels Desktop.");
+                    serial_println!("[xHCI] Port {} assumed non-keyboard by fallback.", port);
                 }
             }
             dev.is_keyboard = is_keyboard;

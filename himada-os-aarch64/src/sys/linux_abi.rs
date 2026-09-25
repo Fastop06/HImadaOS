@@ -1933,7 +1933,7 @@ pub fn sys_exit_group(code: u64) -> u64 {
             if proc.tgid == cur_tgid || (cur_ttbr0 != 0 && proc.ttbr0 == cur_ttbr0) {
                 proc.state = crate::sys::process::ProcessState::Zombie;
                 proc.exit_code = code as i32;
-                proc.running_cpu = None;
+                proc.running_cpu.store(-1, core::sync::atomic::Ordering::Release);
                 let clear_tid = proc.clear_child_tid;
                 if clear_tid != 0 {
                     unsafe {
@@ -1968,7 +1968,7 @@ pub fn sys_exit(code: u64) -> u64 {
     if let Some(proc) = pm.get_process_mut(cur_pid) {
         proc.state = crate::sys::process::ProcessState::Zombie;
         proc.exit_code = code as i32;
-        proc.running_cpu = None;
+        proc.running_cpu.store(-1, core::sync::atomic::Ordering::Release);
         clear_tid = proc.clear_child_tid;
         crate::serial_println!("[Process/Thread] TID {} exited with code {}", cur_pid, code);
     }
@@ -2248,7 +2248,7 @@ pub fn sys_clone_ctx(
     }
 
     child.cpu_context.sp = child_sp as u64;
-    child.cpu_context.x30 = crate::sys::process::return_from_fork_trampoline as usize as u64;
+    child.cpu_context.x30 = crate::sys::process::return_from_fork_trampoline as *const () as usize as u64;
 
     // Write TID to parent_tidptr if requested
     if (flags & CLONE_PARENT_SETTID) != 0 && parent_tidptr != 0 {

@@ -93,10 +93,10 @@ pub fn connect_lo(handle: SocketHandle, ip: [u8; 4], port: u16) -> Result<(), &'
     };
 
     {
-        let mut sockets = LOOPBACK_SOCKETS.lock();
-        let socket = sockets.get_mut::<TcpSocket>(handle);
         let mut lo_opt = LOOPBACK_IFACE.lock();
         let iface = lo_opt.as_mut().ok_or("No loopback interface")?;
+        let mut sockets = LOOPBACK_SOCKETS.lock();
+        let socket = sockets.get_mut::<TcpSocket>(handle);
         socket.connect(iface.context(), remote_endpoint, local_port)
             .map_err(|_| "Loopback socket connect call failed")?;
     }
@@ -129,10 +129,10 @@ pub fn connect_eth(handle: SocketHandle, ip: [u8; 4], port: u16) -> Result<(), &
     };
 
     {
-        let mut sockets = NET_SOCKETS.lock();
-        let socket = sockets.get_mut::<TcpSocket>(handle);
         let mut iface_opt = NET_IFACE.lock();
         let iface = iface_opt.as_mut().ok_or("No ethernet interface")?;
+        let mut sockets = NET_SOCKETS.lock();
+        let socket = sockets.get_mut::<TcpSocket>(handle);
         socket.connect(iface.context(), remote_endpoint, local_port)
             .map_err(|_| "Ethernet socket connect call failed")?;
     }

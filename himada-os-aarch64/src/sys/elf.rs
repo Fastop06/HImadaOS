@@ -372,10 +372,10 @@ pub fn load_and_run(file_data: &[u8]) -> ! {
     proc.entry_point = entry;
     proc.ustack_top = sp;
     proc.state = ProcessState::Running;
-    proc.running_cpu = Some(0);
+    proc.running_cpu.store(0, core::sync::atomic::Ordering::Release);
+    proc.cpu_context.x30 = crate::sys::process::return_from_fork_trampoline as *const () as usize as u64;
 
-    let kstack_top = unsafe { (crate::sys::KERNEL_STACK.0.as_mut_ptr() as usize) + 65536 };
-    proc.kstack_top = kstack_top;
+    let kstack_top = proc.kstack_top;
 
     {
         let mut pm = PROCESS_MANAGER.lock();
