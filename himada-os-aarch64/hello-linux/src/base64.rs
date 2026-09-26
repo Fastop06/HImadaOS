@@ -46,35 +46,37 @@ fn decode_char(c: u8) -> Option<u8> {
 
 pub fn decode_base64(input: &[u8], output: &mut [u8]) -> usize {
     let mut out_idx = 0;
-    let mut i = 0;
+    let mut quad_bytes = [0u8; 4];
+    let mut quad_len = 0;
 
-    while i + 3 < input.len() {
-        let c0 = input[i];
-        let c1 = input[i + 1];
-        let c2 = input[i + 2];
-        let c3 = input[i + 3];
-
-        let v0 = match decode_char(c0) { Some(v) => v, None => { i += 1; continue; } };
-        let v1 = match decode_char(c1) { Some(v) => v, None => { i += 1; continue; } };
-        let v2 = match decode_char(c2) { Some(v) => v, None => { i += 1; continue; } };
-        let v3 = match decode_char(c3) { Some(v) => v, None => { i += 1; continue; } };
-
-        if out_idx < output.len() {
-            output[out_idx] = (v0 << 2) | (v1 >> 4);
-            out_idx += 1;
+    for &b in input {
+        if b == b'\r' || b == b'\n' || b == b' ' || b == b'\t' {
+            continue;
         }
+        if decode_char(b).is_some() {
+            quad_bytes[quad_len] = b;
+            quad_len += 1;
+            if quad_len == 4 {
+                let v0 = decode_char(quad_bytes[0]).unwrap();
+                let v1 = decode_char(quad_bytes[1]).unwrap();
+                let v2 = decode_char(quad_bytes[2]).unwrap();
+                let v3 = decode_char(quad_bytes[3]).unwrap();
 
-        if c2 != b'=' && out_idx < output.len() {
-            output[out_idx] = ((v1 & 0x0f) << 4) | (v2 >> 2);
-            out_idx += 1;
+                if out_idx < output.len() {
+                    output[out_idx] = (v0 << 2) | (v1 >> 4);
+                    out_idx += 1;
+                }
+                if quad_bytes[2] != b'=' && out_idx < output.len() {
+                    output[out_idx] = ((v1 & 0x0f) << 4) | (v2 >> 2);
+                    out_idx += 1;
+                }
+                if quad_bytes[3] != b'=' && out_idx < output.len() {
+                    output[out_idx] = ((v2 & 0x03) << 6) | v3;
+                    out_idx += 1;
+                }
+                quad_len = 0;
+            }
         }
-
-        if c3 != b'=' && out_idx < output.len() {
-            output[out_idx] = ((v2 & 0x03) << 6) | v3;
-            out_idx += 1;
-        }
-
-        i += 4;
     }
 
     out_idx

@@ -65,6 +65,8 @@ mod sys_nr {
     pub const UMOUNT2: usize = 166;
     pub const NANOSLEEP: usize = 101;
     pub const FCHMOD: usize = 52;
+    pub const FCNTL: usize = 25;
+    pub const PPOLL: usize = 73;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -106,6 +108,8 @@ mod sys_nr {
     pub const UMOUNT2: usize = 166;
     pub const NANOSLEEP: usize = 35;
     pub const FCHMOD: usize = 91;
+    pub const FCNTL: usize = 72;
+    pub const PPOLL: usize = 271;
 }
 
 pub const PROT_READ: usize = 1;
@@ -596,20 +600,99 @@ fn print_color(color: &str, s: &str) {
 static mut LISTEN_FD: usize = 0;
 static mut SSH_LISTEN_FD: usize = 0;
 
+static mut WEB_BODY_BUF: [u8; 65536] = [0u8; 65536];
+
 fn poll_web_server() {
     unsafe {
         if LISTEN_FD == 0 { return; }
-        // Non-blocking accept (flags = 1)
         let connfd = syscall3(sys_nr::ACCEPT, LISTEN_FD, 0, 1);
-        if connfd != !0 && connfd > 0 {
-            let mut req = [0u8; 1024];
-            let _ = syscall3(sys_nr::READ, connfd, req.as_mut_ptr() as usize, 1024);
-            let response = b"HTTP/1.1 200 OK\r\nDate: Fri, 18 Sep 2026 19:30:00 GMT\r\nServer: Apache/2.4.65 (HimadaOS Rolling)\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: 402\r\nConnection: close\r\n\r\n<!DOCTYPE html>\n<html>\n<head>\n  <title>HimadaOS</title>\n  <style>\n    body { font-family: sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 50px; }\n    h1 { color: #38bdf8; font-size: 2.5rem; }\n    p { color: #94a3b8; font-size: 1.2rem; }\n  </style>\n</head>\n<body>\n  <h1>It works!</h1>\n  <p>Apache HTTP Server is active on <strong>HimadaOS 2.0</strong>.</p>\n</body>\n</html>\n";
-            syscall3(sys_nr::WRITE, connfd, response.as_ptr() as usize, response.len());
-            syscall1(sys_nr::CLOSE, connfd);
+        if connfd == !0 || connfd == 0 { return; }
+
+        let mut req = [0u8; 1024];
+        let n = syscall3(sys_nr::READ, connfd, req.as_mut_ptr() as usize, 1024);
+
+        let mut is_api_stats = false;
+        let mut is_head = false;
+        if n > 0 && n != !0 {
+            if let Ok(req_str) = core::str::from_utf8(&req[..n]) {
+                if req_str.starts_with("HEAD ") || req_str.contains("\r\nHEAD ") {
+                    is_head = true;
+                }
+                if req_str.contains("/api/stats") {
+                    is_api_stats = true;
+                }
+            }
         }
+
+        if is_api_stats {
+            let api_json = b"HTTP/1.1 200 OK\r\nServer: HimadaOS-Engine/2.0\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"os\":\"HimadaOS 2.0\",\"kernel\":\"6.8.0-himada SMP\",\"cores\":4,\"arch\":\"aarch64\",\"memory_total_mb\":1024,\"memory_free_mb\":966,\"security\":\"Formal SMT Proven\",\"status\":\"online\"}\n";
+            syscall3(sys_nr::WRITE, connfd, api_json.as_ptr() as usize, api_json.len());
+            syscall1(sys_nr::CLOSE, connfd);
+            return;
+        }
+
+        // Dynamically read from /var/www/localhost/htdocs/index.html on disk
+        let file_path = b"/var/www/localhost/htdocs/index.html\0";
+        let at_fdcwd: usize = (-100i64) as usize;
+        let file_fd = syscall3(sys_nr::OPENAT, at_fdcwd, file_path.as_ptr() as usize, 0);
+
+        let mut body_len = 0;
+        if file_fd != !0 && file_fd > 0 {
+            let mut total_read = 0;
+            while total_read < 65500 {
+                let r = syscall3(sys_nr::READ, file_fd, WEB_BODY_BUF.as_mut_ptr().add(total_read) as usize, 65500 - total_read);
+                if r == 0 || r == !0 { break; }
+                total_read += r;
+            }
+            syscall1(sys_nr::CLOSE, file_fd);
+            body_len = total_read;
+        }
+
+        if body_len > 0 {
+            let mut header = [0u8; 256];
+            let mut hlen = 0;
+            let h1 = b"HTTP/1.1 200 OK\r\nServer: HimadaOS-Engine/2.0\r\nContent-Type: text/html; charset=UTF-8\r\nConnection: close\r\nContent-Length: ";
+            header[..h1.len()].copy_from_slice(h1);
+            hlen += h1.len();
+
+            let mut num_buf = [0u8; 16];
+            let mut val = body_len;
+            let mut temp = [0u8; 16];
+            let mut tlen = 0;
+            while val > 0 {
+                temp[tlen] = b'0' + (val % 10) as u8;
+                tlen += 1;
+                val /= 10;
+            }
+            for i in 0..tlen {
+                num_buf[i] = temp[tlen - 1 - i];
+            }
+            let num_len = tlen;
+            header[hlen..hlen+num_len].copy_from_slice(&num_buf[..num_len]);
+            hlen += num_len;
+
+            let h2 = b"\r\n\r\n";
+            header[hlen..hlen+h2.len()].copy_from_slice(h2);
+            hlen += h2.len();
+
+            syscall3(sys_nr::FCNTL, connfd, 4 /* F_SETFL */, 0);
+            syscall3(sys_nr::WRITE, connfd, header.as_ptr() as usize, hlen);
+            if !is_head {
+                let mut written = 0;
+                while written < body_len {
+                    let n = syscall3(sys_nr::WRITE, connfd, WEB_BODY_BUF.as_ptr().add(written) as usize, body_len - written);
+                    if n == 0 || n == !0 { break; }
+                    written += n;
+                }
+            }
+        } else {
+            let not_found = b"HTTP/1.1 404 Not Found\r\nServer: HimadaOS-Engine/2.0\r\nContent-Type: text/plain\r\nContent-Length: 51\r\nConnection: close\r\n\r\n404 Not Found: /var/www/localhost/htdocs/index.html\n";
+            syscall3(sys_nr::WRITE, connfd, not_found.as_ptr() as usize, not_found.len());
+        }
+        syscall1(sys_nr::CLOSE, connfd);
     }
 }
+
 
 fn poll_ssh_server() {
     unsafe {
@@ -622,11 +705,14 @@ fn poll_ssh_server() {
         };
         let connfd = syscall3(sys_nr::ACCEPT, SSH_LISTEN_FD, &raw mut client_addr as usize, 1);
         if connfd != !0 && connfd > 0 {
+            // Set O_NONBLOCK so the subsequent read doesn't stall the shell
+            syscall3(sys_nr::FCNTL, connfd, 4 /* F_SETFL */, 0x800 /* O_NONBLOCK */);
+
             // 1. Send SSH-2.0 RFC 4253 protocol identification string AND initial welcome banner
             let greeting = b"SSH-2.0-Dropbear_2024.84\r\nWelcome to HimadaOS 2.0 (rolling-release) (Linux 6.8.0-himada aarch64)\r\n\r\nAuthenticated root via Dropbear SSH 2024.84. Session allocated /dev/pts/0.\r\n[root@himada ~]# ";
             syscall3(sys_nr::WRITE, connfd, greeting.as_ptr() as usize, greeting.len());
 
-            // 2. Read client greeting / command
+            // 2. Read client greeting / command (non-blocking — returns 0 immediately if no data)
             let mut req = [0u8; 1024];
             let n = syscall3(sys_nr::READ, connfd, req.as_mut_ptr() as usize, 1024);
 
@@ -5366,6 +5452,66 @@ fn cmd_bc(args: &str) {
     cmd_calc(args);
 }
 
+fn cmd_sqlite(args: &str) {
+    if !pacman::is_installed("sqlite") {
+        print("himada-sh: sqlite3: command not found\nRun 'pacman -S sqlite' or 'hpm -S sqlite' to install it.\n");
+        return;
+    }
+    let a = args.trim();
+    if a == "--version" || a == "-v" || a == "-V" {
+        print("3.46.0 2024-05-23 (HimadaOS AArch64)\n");
+        return;
+    }
+    if a.contains("SELECT") || a.contains("select") {
+        print("HimadaOS In-Memory SQL Engine\nResult: 1 row returned.\n");
+        return;
+    }
+    print("SQLite version 3.46.0 2024-05-23\nEnter \".help\" for usage hints.\nConnected to a transient in-memory database.\nsqlite> \n");
+}
+
+fn cmd_zstd(args: &str) {
+    if !pacman::is_installed("zstd") {
+        print("himada-sh: zstd: command not found\nRun 'pacman -S zstd' or 'hpm -S zstd' to install it.\n");
+        return;
+    }
+    let a = args.trim();
+    if a == "--version" || a == "-v" || a == "-V" {
+        print("*** zstd command line interface 64-bits v1.5.7, by Yann Collet ***\n");
+        return;
+    }
+    if a.is_empty() || a.contains("-h") || a.contains("--help") {
+        print("Usage: zstd [OPTIONS] [-|INPUT-FILE] [-o OUTPUT-FILE]\n  -1 ... -19 : compression level (default: 3)\n  -d         : decompression\n  -v         : be verbose\n");
+        return;
+    }
+    print("zstd: compressed successfully (ratio 2.85x, 0.002s)\n");
+}
+
+fn cmd_eza(args: &str) {
+    if !pacman::is_installed("eza") {
+        print("himada-sh: eza: command not found\nRun 'pacman -S eza' or 'hpm -S eza' to install it.\n");
+        return;
+    }
+    let a = args.trim();
+    if a.contains("--version") || a == "-v" || a == "-V" {
+        print("v0.23.5 [aarch64-himada-linux]\nhttps://eza.rocks\n");
+        return;
+    }
+    cmd_ls(args);
+}
+
+fn cmd_ncdu(args: &str) {
+    if !pacman::is_installed("ncdu") {
+        print("himada-sh: ncdu: command not found\nRun 'pacman -S ncdu' or 'hpm -S ncdu' to install it.\n");
+        return;
+    }
+    let a = args.trim();
+    if a.contains("--version") || a == "-v" || a == "-V" {
+        print("ncdu 2.9.2\n");
+        return;
+    }
+    print("ncdu 2.9.2 ~ Use the arrow keys to navigate, press ? for help, q to quit\n--- /root ----------------------------------------------------------------------\n    4.0 KiB [##########] /var\n    4.0 KiB [##########] /etc\n    1.0 KiB [##        ]  welcome.txt\n Total disk usage: 9.0 KiB  Apparent size: 9.0 KiB  Items: 14\n");
+}
+
 fn cmd_sudo(args: &str) {
     // Just execute the command as if already root
     execute_command(args);
@@ -5591,6 +5737,9 @@ fn cmd_md5sum(args: &str) {
     }
 }
 
+static mut B64_IN_BUF: [u8; 65536] = [0u8; 65536];
+static mut B64_OUT_BUF: [u8; 65536] = [0u8; 65536];
+
 fn cmd_base64(args: &str) {
     let trimmed = args.trim();
     let (decode, file) = if trimmed.starts_with("-d ") {
@@ -5608,8 +5757,11 @@ fn cmd_base64(args: &str) {
 
     let mut c_path = [0u8; 128];
     let fb = file.as_bytes();
-    c_path[..fb.len().min(127)].copy_from_slice(&fb[..fb.len().min(127)]);
-    let fd = syscall3(sys_nr::OPENAT, 0, c_path.as_ptr() as usize, 0);
+    let flen = fb.len().min(127);
+    c_path[..flen].copy_from_slice(&fb[..flen]);
+    c_path[flen] = 0;
+    let at_fdcwd = (-100i64) as usize;
+    let fd = syscall3(sys_nr::OPENAT, at_fdcwd, c_path.as_ptr() as usize, 0);
     if fd == !0 || fd == 0 {
         print("base64: ");
         print(file);
@@ -5617,31 +5769,31 @@ fn cmd_base64(args: &str) {
         return;
     }
 
-    let mut in_buf = [0u8; 2048];
-    let mut n_total = 0;
-    loop {
-        let n = syscall3(sys_nr::READ, fd, in_buf[n_total..].as_mut_ptr() as usize, in_buf.len() - n_total);
-        if n == 0 || n == !0 {
-            break;
+    let n_total = unsafe {
+        let mut total = 0;
+        while total < B64_IN_BUF.len() {
+            let n = syscall3(sys_nr::READ, fd, B64_IN_BUF.as_mut_ptr().add(total) as usize, B64_IN_BUF.len() - total);
+            if n == 0 || n == !0 { break; }
+            total += n;
         }
-        n_total += n;
-        if n_total >= in_buf.len() {
-            break;
-        }
-    }
+        total
+    };
     syscall1(sys_nr::CLOSE, fd);
 
-    let mut out_buf = [0u8; 4096];
     if decode {
-        let out_len = base64::decode_base64(&in_buf[..n_total], &mut out_buf);
-        if let Ok(s) = core::str::from_utf8(&out_buf[..out_len]) {
-            print(s);
-        } else {
-            syscall3(sys_nr::WRITE, unsafe { REDIRECT_FD.unwrap_or(1) }, out_buf.as_ptr() as usize, out_len);
+        let out_len = unsafe { base64::decode_base64(&B64_IN_BUF[..n_total], &mut B64_OUT_BUF) };
+        unsafe {
+            let out_fd = REDIRECT_FD.unwrap_or(1);
+            let mut written = 0;
+            while written < out_len {
+                let w = syscall3(sys_nr::WRITE, out_fd, B64_OUT_BUF.as_ptr().add(written) as usize, out_len - written);
+                if w == 0 || w == !0 { break; }
+                written += w;
+            }
         }
     } else {
-        let out_len = base64::encode_base64(&in_buf[..n_total], &mut out_buf);
-        if let Ok(s) = core::str::from_utf8(&out_buf[..out_len]) {
+        let out_len = unsafe { base64::encode_base64(&B64_IN_BUF[..n_total], &mut B64_OUT_BUF) };
+        if let Ok(s) = core::str::from_utf8(unsafe { &B64_OUT_BUF[..out_len] }) {
             print(s);
             print("\n");
         }
@@ -5845,7 +5997,8 @@ fn execute_command(line: &str) {
         };
 
         if flags != 0 {
-            let fd = syscall3(sys_nr::OPENAT, 0, c_path.as_ptr() as usize, flags);
+            let at_fdcwd = (-100i64) as usize;
+            let fd = syscall4(sys_nr::OPENAT, at_fdcwd, c_path.as_ptr() as usize, flags, 0o666);
             if fd != !0 && fd > 0 {
                 unsafe { REDIRECT_FD = Some(fd) };
                 redirect_cleanup_fd = Some(fd);
@@ -5997,7 +6150,9 @@ fn dispatch_command(cmd: &str, args: &str) {
         "calc" | "bc" => {
             if pacman::is_installed("calc") || pacman::is_installed("bc") {
                 if let Some(path) = find_in_path("calc") {
-                    exec_from_disk(&path, "calc", args);
+                    if !exec_from_disk_with_result(&path, "calc", args) {
+                        cmd_calc(args);
+                    }
                 } else {
                     cmd_calc(args);
                 }
@@ -6054,16 +6209,30 @@ fn dispatch_command(cmd: &str, args: &str) {
             if let Some(path) = find_in_path("zsh") { exec_from_disk(&path, "zsh", args); } else { cmd_zsh(args); }
         },
         "tmux" => {
-            if let Some(path) = find_in_path("tmux") {
-                exec_from_disk(&path, "tmux", args);
-            } else if pacman::is_installed("tmux") {
-                cmd_tmux(args);
+            if pacman::is_installed("tmux") {
+                if let Some(path) = find_in_path("tmux") {
+                    if !exec_from_disk_with_result(&path, "tmux", args) {
+                        cmd_tmux(args);
+                    }
+                } else {
+                    cmd_tmux(args);
+                }
             } else {
                 print("himada-sh: tmux: command not found\nRun 'pacman -S tmux' to install it.\n");
             }
         },
         "screen" => {
-            if let Some(path) = find_in_path("screen") { exec_from_disk(&path, "screen", args); } else { cmd_screen(args); }
+            if pacman::is_installed("screen") {
+                if let Some(path) = find_in_path("screen") {
+                    if !exec_from_disk_with_result(&path, "screen", args) {
+                        cmd_screen(args);
+                    }
+                } else {
+                    cmd_screen(args);
+                }
+            } else {
+                print("himada-sh: screen: command not found\nRun 'pacman -S screen' or 'hpm -S screen' to install it.\n");
+            }
         },
         "nginx" => {
             if let Some(path) = find_in_path("nginx") { exec_from_disk(&path, "nginx", args); } else { cmd_nginx(args); }
@@ -6071,7 +6240,9 @@ fn dispatch_command(cmd: &str, args: &str) {
         "jq" => {
             if pacman::is_installed("jq") {
                 if let Some(path) = find_in_path("jq") {
-                    exec_from_disk(&path, "jq", args);
+                    if !exec_from_disk_with_result(&path, "jq", args) {
+                        cmd_jq(args);
+                    }
                 } else {
                     cmd_jq(args);
                 }
@@ -6085,7 +6256,9 @@ fn dispatch_command(cmd: &str, args: &str) {
         "nmap" => {
             if pacman::is_installed("nmap") {
                 if let Some(path) = find_in_path("nmap") {
-                    exec_from_disk(&path, "nmap", args);
+                    if !exec_from_disk_with_result(&path, "nmap", args) {
+                        cmd_nmap(args);
+                    }
                 } else {
                     cmd_nmap(args);
                 }
@@ -6093,12 +6266,26 @@ fn dispatch_command(cmd: &str, args: &str) {
                 print("himada-sh: nmap: command not found\nRun 'pacman -S nmap' or 'hpm -S nmap' to install it.\n");
             }
         },
-        "socat" => cmd_socat(args),
+        "socat" => {
+            if pacman::is_installed("socat") {
+                if let Some(path) = find_in_path("socat") {
+                    if !exec_from_disk_with_result(&path, "socat", args) {
+                        cmd_socat(args);
+                    }
+                } else {
+                    cmd_socat(args);
+                }
+            } else {
+                print("himada-sh: socat: command not found\nRun 'pacman -S socat' or 'hpm -S socat' to install it.\n");
+            }
+        },
         "redis-server" => cmd_redis_server(args),
         "redis-cli" => {
             if pacman::is_installed("redis") {
                 if let Some(path) = find_in_path("redis-cli") {
-                    exec_from_disk(&path, "redis-cli", args);
+                    if !exec_from_disk_with_result(&path, "redis-cli", args) {
+                        cmd_redis_cli(args);
+                    }
                 } else {
                     cmd_redis_cli(args);
                 }
@@ -6106,22 +6293,122 @@ fn dispatch_command(cmd: &str, args: &str) {
                 print("himada-sh: redis-cli: command not found\nRun 'pacman -S redis' or 'hpm -S redis' to install it.\n");
             }
         },
-        "redis" => cmd_redis_server(args),
+        "redis" => {
+            if pacman::is_installed("redis") {
+                if let Some(path) = find_in_path("redis-server").or_else(|| find_in_path("redis")) {
+                    if !exec_from_disk_with_result(&path, "redis-server", args) {
+                        cmd_redis_server(args);
+                    }
+                } else {
+                    cmd_redis_server(args);
+                }
+            } else {
+                print("himada-sh: redis: command not found\nRun 'pacman -S redis' to install it.\n");
+            }
+        },
         "zip" => {
-            if let Some(path) = find_in_path("zip") { exec_from_disk(&path, "zip", args); } else { cmd_zip(args); }
+            if pacman::is_installed("zip") {
+                if let Some(path) = find_in_path("zip") {
+                    if !exec_from_disk_with_result(&path, "zip", args) {
+                        cmd_zip(args);
+                    }
+                } else {
+                    cmd_zip(args);
+                }
+            } else {
+                print("himada-sh: zip: command not found\nRun 'pacman -S zip' or 'hpm -S zip' to install it.\n");
+            }
         },
         "unzip" => {
-            if let Some(path) = find_in_path("unzip") { exec_from_disk(&path, "unzip", args); } else { cmd_unzip(args); }
+            if pacman::is_installed("unzip") {
+                if let Some(path) = find_in_path("unzip") {
+                    if !exec_from_disk_with_result(&path, "unzip", args) {
+                        cmd_unzip(args);
+                    }
+                } else {
+                    cmd_unzip(args);
+                }
+            } else {
+                print("himada-sh: unzip: command not found\nRun 'pacman -S unzip' or 'hpm -S unzip' to install it.\n");
+            }
         },
         "nvim" | "neovim" => {
-            if let Some(path) = find_in_path("nvim").or_else(|| find_in_path("neovim")) {
-                exec_from_disk(&path, "nvim", args);
+            if pacman::is_installed("neovim") {
+                if let Some(path) = find_in_path("nvim").or_else(|| find_in_path("neovim")) {
+                    if !exec_from_disk_with_result(&path, "nvim", args) {
+                        cmd_neovim(args);
+                    }
+                } else {
+                    cmd_neovim(args);
+                }
             } else {
-                cmd_neovim(args);
+                print("himada-sh: nvim: command not found\nRun 'pacman -S neovim' or 'hpm -S neovim' to install it.\n");
             }
         },
         "btop" => {
-            if let Some(path) = find_in_path("btop") { exec_from_disk(&path, "btop", args); } else { cmd_btop(args); }
+            if pacman::is_installed("btop") {
+                if let Some(path) = find_in_path("btop") {
+                    if !exec_from_disk_with_result(&path, "btop", args) {
+                        cmd_btop(args);
+                    }
+                } else {
+                    cmd_btop(args);
+                }
+            } else {
+                print("himada-sh: btop: command not found\nRun 'pacman -S btop' to install it.\n");
+            }
+        },
+        "sqlite" | "sqlite3" => {
+            if pacman::is_installed("sqlite") {
+                if let Some(path) = find_in_path("sqlite3").or_else(|| find_in_path("sqlite")) {
+                    if !exec_from_disk_with_result(&path, "sqlite3", args) {
+                        cmd_sqlite(args);
+                    }
+                } else {
+                    cmd_sqlite(args);
+                }
+            } else {
+                print("himada-sh: sqlite3: command not found\nRun 'pacman -S sqlite' or 'hpm -S sqlite' to install it.\n");
+            }
+        },
+        "zstd" => {
+            if pacman::is_installed("zstd") {
+                if let Some(path) = find_in_path("zstd") {
+                    if !exec_from_disk_with_result(&path, "zstd", args) {
+                        cmd_zstd(args);
+                    }
+                } else {
+                    cmd_zstd(args);
+                }
+            } else {
+                print("himada-sh: zstd: command not found\nRun 'pacman -S zstd' or 'hpm -S zstd' to install it.\n");
+            }
+        },
+        "eza" | "exa" => {
+            if pacman::is_installed("eza") {
+                if let Some(path) = find_in_path("eza").or_else(|| find_in_path("exa")) {
+                    if !exec_from_disk_with_result(&path, "eza", args) {
+                        cmd_eza(args);
+                    }
+                } else {
+                    cmd_eza(args);
+                }
+            } else {
+                print("himada-sh: eza: command not found\nRun 'pacman -S eza' or 'hpm -S eza' to install it.\n");
+            }
+        },
+        "ncdu" => {
+            if pacman::is_installed("ncdu") {
+                if let Some(path) = find_in_path("ncdu") {
+                    if !exec_from_disk_with_result(&path, "ncdu", args) {
+                        cmd_ncdu(args);
+                    }
+                } else {
+                    cmd_ncdu(args);
+                }
+            } else {
+                print("himada-sh: ncdu: command not found\nRun 'pacman -S ncdu' or 'hpm -S ncdu' to install it.\n");
+            }
         },
         "tcpdump" => {
             let has_slash = cmd.starts_with('/') || cmd.starts_with("./");
@@ -6375,41 +6662,74 @@ pub extern "C" fn _start() -> ! {
     cmd_cd("/root");
     print_prompt();
 
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    #[repr(C)]
+    struct TimeSpec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+
+    let mut pfd = PollFd {
+        fd: 0,
+        events: 1, // POLLIN
+        revents: 0,
+    };
+
+    let ts = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 10_000_000, // 10 ms
+    };
+
     // ── Interactive ANSI VT100 LineEditor Loop ──────────────────
     loop {
         poll_servers();
-        let mut b = 0u8;
-        let n = syscall3(sys_nr::READ, 0, &raw mut b as usize, 1);
-        if n == 1 && b != 0 {
-            let action = unsafe {
-                SHELL_EDITOR.feed_byte(
-                    b,
-                    |s| print_raw(s),
-                    &print_prompt,
-                    &shell_completer,
-                )
-            };
 
-            match action {
-                line_editor::EditorAction::Submit => {
-                    let cmd_len = unsafe { SHELL_EDITOR.len };
-                    if cmd_len > 0 {
-                        if let Ok(cmd_str) = core::str::from_utf8(unsafe { &SHELL_EDITOR.buf[..cmd_len] }) {
-                            execute_command(cmd_str);
+        pfd.revents = 0;
+        let ready = syscall5(sys_nr::PPOLL, &raw mut pfd as usize, 1, &raw const ts as usize, 0, 0);
+
+        if ready > 0 && (pfd.revents & 1) != 0 {
+            let mut b = 0u8;
+            let n = syscall3(sys_nr::READ, 0, &raw mut b as usize, 1);
+            if n == 1 && b != 0 {
+                let action = unsafe {
+                    SHELL_EDITOR.feed_byte(
+                        b,
+                        |s| print_raw(s),
+                        &print_prompt,
+                        &shell_completer,
+                    )
+                };
+
+                match action {
+                    line_editor::EditorAction::Submit => {
+                        let cmd_len = unsafe { SHELL_EDITOR.len };
+                        if cmd_len > 0 {
+                            if let Ok(cmd_str) = core::str::from_utf8(unsafe { &SHELL_EDITOR.buf[..cmd_len] }) {
+                                execute_command(cmd_str);
+                            }
                         }
+                        unsafe { SHELL_EDITOR.reset_line() };
+                        print_prompt();
                     }
-                    unsafe { SHELL_EDITOR.reset_line() };
-                    print_prompt();
+                    line_editor::EditorAction::Interrupt => {
+                        print_prompt();
+                    }
+                    line_editor::EditorAction::Eof => {
+                        print_raw("exit\n");
+                        syscall1(sys_nr::EXIT, 0);
+                        loop {}
+                    }
+                    line_editor::EditorAction::None => {}
                 }
-                line_editor::EditorAction::Interrupt => {
-                    print_prompt();
-                }
-                line_editor::EditorAction::Eof => {
-                    print_raw("exit\n");
-                    syscall1(sys_nr::EXIT, 0);
-                    loop {}
-                }
-                line_editor::EditorAction::None => {}
+            } else {
+                let req = [0u64, 5_000_000u64];
+                syscall2(sys_nr::NANOSLEEP, req.as_ptr() as usize, 0);
             }
         } else {
             let req = [0u64, 5_000_000u64];

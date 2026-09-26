@@ -1,6 +1,6 @@
 // Interactive ANSI Terminal Line Editor for HimadaOS
 
-pub const MAX_LINE: usize = 512;
+pub const MAX_LINE: usize = 2048;
 pub const MAX_HISTORY: usize = 32;
 
 #[derive(Copy, Clone, PartialEq, Eq)]

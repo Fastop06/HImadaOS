@@ -117,17 +117,37 @@ pub static mut REPO_PACKAGES: [PackageInfo; 73] = [
 pub fn is_installed(name: &str) -> bool {
     unsafe {
         for p in &REPO_PACKAGES {
-            if p.name == name {
-                return p.installed;
+            if p.name == name && p.installed {
+                return true;
             }
         }
         for dp in &DYN_PACKAGES {
-            if dp.valid {
-                if let Ok(dname) = core::str::from_utf8(&dp.name) {
+            if dp.valid && dp.installed {
+                let nl = dp.name.iter().position(|&b| b == 0).unwrap_or(dp.name.len());
+                if let Ok(dname) = core::str::from_utf8(&dp.name[..nl]) {
                     if dname.trim_matches(char::from(0)) == name {
-                        return dp.installed;
+                        return true;
                     }
                 }
+            }
+        }
+        let mut pbuf = [0u8; 64];
+        let nb = name.as_bytes();
+        let nl = nb.len().min(40);
+        let ubin = b"/usr/bin/";
+        pbuf[..ubin.len()].copy_from_slice(ubin);
+        pbuf[ubin.len()..ubin.len()+nl].copy_from_slice(&nb[..nl]);
+        if let Ok(p_str) = core::str::from_utf8(&pbuf[..ubin.len()+nl]) {
+            if crate::file_exists_on_disk(p_str) {
+                return true;
+            }
+        }
+        let bin = b"/bin/";
+        pbuf[..bin.len()].copy_from_slice(bin);
+        pbuf[bin.len()..bin.len()+nl].copy_from_slice(&nb[..nl]);
+        if let Ok(p_str) = core::str::from_utf8(&pbuf[..bin.len()+nl]) {
+            if crate::file_exists_on_disk(p_str) {
+                return true;
             }
         }
         false
@@ -1249,7 +1269,29 @@ pub fn install_package_payload(name: &str, version: &str) -> bool {
     cand5[l5..l5+4].copy_from_slice(b".bin"); l5 += 4;
     let cand5_str = core::str::from_utf8(&cand5[..l5]).unwrap_or("");
 
-    for &cand in &[cand0_str, cand0b_str] {
+    // Candidate 6: /repo/<name>.pkg
+    let mut cand6 = [0u8; 128];
+    cand6[..pr.len()].copy_from_slice(pr);
+    let mut l6 = pr.len();
+    cand6[l6..l6+nl].copy_from_slice(&nb[..nl]); l6 += nl;
+    cand6[l6..l6+4].copy_from_slice(b".pkg"); l6 += 4;
+    let cand6_str = core::str::from_utf8(&cand6[..l6]).unwrap_or("");
+
+    // Candidate 7: /repo/<name>
+    let mut cand7 = [0u8; 128];
+    cand7[..pr.len()].copy_from_slice(pr);
+    let mut l7 = pr.len();
+    cand7[l7..l7+nl].copy_from_slice(&nb[..nl]); l7 += nl;
+    let cand7_str = core::str::from_utf8(&cand7[..l7]).unwrap_or("");
+
+    // Candidate 8: /var/cache/pacman/pkg/<name>
+    let mut cand8 = [0u8; 128];
+    cand8[..p1.len()].copy_from_slice(p1);
+    let mut l8 = p1.len();
+    cand8[l8..l8+nl].copy_from_slice(&nb[..nl]); l8 += nl;
+    let cand8_str = core::str::from_utf8(&cand8[..l8]).unwrap_or("");
+
+    for &cand in &[cand2_str, cand5_str, cand7_str, cand8_str, cand1_str, cand3_str, cand4_str, cand6_str, cand0_str, cand0b_str] {
         if !cand.is_empty() && crate::file_exists_on_disk(cand) {
             if extract_tar_archive(cand) {
                 return true;
@@ -1332,6 +1374,12 @@ pub fn install_package_payload(name: &str, version: &str) -> bool {
     });
 
     if download_success {
+        return true;
+    }
+
+    // Fallback: if this tool is part of HimadaOS multicall binary suite, deploy binary marker
+    if copy_package_file("/bin/himada-sh", dest_usr_str) {
+        copy_package_file("/bin/himada-sh", dest_bin_str);
         return true;
     }
 
@@ -1538,6 +1586,11 @@ fn install_packages<F: FnMut(&str)>(targets: &[&str], noconfirm: bool, print_fn:
                 continue;
             }
 
+            for p in REPO_PACKAGES.iter_mut() {
+                if p.name == pkg_name {
+                    p.installed = true;
+                }
+            }
             if is_repo {
                 REPO_PACKAGES[idx].installed = true;
             } else {

@@ -23,6 +23,10 @@ pub static mut CPU_BOOT_STACKS: [CpuStack; MAX_CPUS] = [
     CpuStack([0; CPU_STACK_SIZE]),
 ];
 
+#[used]
+#[no_mangle]
+pub static mut CPU_BOOT_STACKS_GUARD: [u8; 65536] = [0; 65536];
+
 pub static CPU_ONLINE_COUNT: AtomicUsize = AtomicUsize::new(1); // BSP starts online
 pub static CPU_ONLINE: [AtomicBool; MAX_CPUS] = [
     AtomicBool::new(true),  // Core 0 (BSP)

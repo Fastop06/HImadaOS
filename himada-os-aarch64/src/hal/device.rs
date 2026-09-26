@@ -42,7 +42,7 @@ lazy_static::lazy_static! {
 }
 
 pub struct VirtIONetWrapper<'a> {
-    pub inner: VirtIONet<VirtioHal, MmioTransport<'a>, 32>,
+    pub inner: VirtIONet<VirtioHal, MmioTransport<'a>, 128>,
 }
 
 impl<'a> NetDevice for VirtIONetWrapper<'a> {
@@ -75,7 +75,7 @@ impl<'a> NetDevice for VirtIONetWrapper<'a> {
 use virtio_drivers::transport::pci::{bus::{ConfigurationAccess, DeviceFunction, PciRoot}, PciTransport};
 
 pub struct VirtIONetPciWrapper {
-    pub inner: VirtIONet<VirtioHal, PciTransport, 32>,
+    pub inner: VirtIONet<VirtioHal, PciTransport, 128>,
 }
 
 impl NetDevice for VirtIONetPciWrapper {
@@ -174,7 +174,7 @@ pub fn probe_pci_bus(ecam_base: usize) -> bool {
                         match transport.device_type() {
                             DeviceType::Network => {
                                 if DEVICE_MANAGER.lock().net_devices.is_empty() {
-                                    if let Ok(net) = VirtIONet::<VirtioHal, PciTransport, 32>::new(transport, 2048) {
+                                    if let Ok(net) = VirtIONet::<VirtioHal, PciTransport, 128>::new(transport, 2048) {
                                         let wrapper = VirtIONetPciWrapper { inner: net };
                                         DEVICE_MANAGER.lock().net_devices.push(Arc::new(Mutex::new(wrapper)));
                                         crate::serial_println!("[Device Manager] Registered VirtIO Net (PCI) at {:02x}:{:02x}.{}!", bus, device, function);
@@ -313,7 +313,7 @@ fn probe_mmio_slot(addr: usize) {
         match transport.device_type() {
             DeviceType::Network => {
                 if DEVICE_MANAGER.lock().net_devices.is_empty() {
-                    if let Ok(net) = VirtIONet::<VirtioHal, MmioTransport, 32>::new(transport, 2048) {
+                    if let Ok(net) = VirtIONet::<VirtioHal, MmioTransport, 128>::new(transport, 2048) {
                         let wrapper = VirtIONetWrapper { inner: net };
                         DEVICE_MANAGER.lock().net_devices.push(Arc::new(Mutex::new(wrapper)));
                         crate::serial_println!("[Device Manager] Registered VirtIO Net at 0x{:x}!", addr);

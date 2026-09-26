@@ -819,7 +819,7 @@ pub fn poll_keyboard() -> Option<u8> {
     }
 
     unsafe {
-        if !XHCI.initialized || XHCI.num_devices == 0 { return None; }
+        if !XHCI.initialized || XHCI.num_devices == 0 || XHCI.event_ring_virt.is_null() { return None; }
 
         // Check up to 16 events in ring to not stall behind skipped non-keyboard events
         for _ in 0..16 {
@@ -881,9 +881,7 @@ pub fn has_input() -> bool {
     unsafe {
         if KEY_HEAD != KEY_TAIL { return true; }
         if !XHCI.initialized || XHCI.num_devices == 0 { return false; }
-        let ev_addr = XHCI.event_ring_virt.add(XHCI.event_dequeue_idx) as usize;
-        core::arch::asm!("dc ivac, {}", in(reg) ev_addr);
-        core::arch::asm!("dsb ish");
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let ev = &*XHCI.event_ring_virt.add(XHCI.event_dequeue_idx);
         let ctrl = ptr::read_volatile(&ev.control);
         (ctrl & 1) == XHCI.event_cycle

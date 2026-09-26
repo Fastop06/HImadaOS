@@ -16,3 +16,6 @@ iso_root_arm64/
 iso_root_x86/
 calc_dynamic*
 musl_test*
+*.png
+*.pdf
+*.txt

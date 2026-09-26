@@ -217,15 +217,16 @@ pub struct FileDescriptor {
     pub offset: usize,
     pub pty_session: Option<Arc<crate::fs::pty::PtySession>>,
     pub path: alloc::string::String,
+    pub nonblock: bool,
 }
 
 impl FileDescriptor {
     pub fn new(node: Arc<VfsNode>, offset: usize) -> Self {
-        Self { node, offset, pty_session: None, path: alloc::string::String::new() }
+        Self { node, offset, pty_session: None, path: alloc::string::String::new(), nonblock: false }
     }
 
     pub fn with_path(node: Arc<VfsNode>, offset: usize, path: alloc::string::String) -> Self {
-        Self { node, offset, pty_session: None, path }
+        Self { node, offset, pty_session: None, path, nonblock: false }
     }
 }
 
@@ -342,6 +343,7 @@ fn sys_openat(dirfd: u64, pathname: u64, flags: u64) -> u64 {
                                 offset: 0,
                                 pty_session: Some(session),
                                 path: alloc::string::String::from("/dev/ptmx"),
+                                nonblock: false,
                             });
                             return i as u64;
                         }
@@ -365,6 +367,7 @@ fn sys_openat(dirfd: u64, pathname: u64, flags: u64) -> u64 {
                                         offset: 0,
                                         pty_session: Some(session),
                                         path: path_resolved,
+                                        nonblock: false,
                                     });
                                     return i as u64;
                                 }
@@ -532,10 +535,12 @@ unsafe fn read_from_desc(desc: &mut FileDescriptor, buf: u64, count: u64) -> u64
         }
     }
     if let NodeKind::Socket(target) = desc.node.kind {
+        let nonblock = desc.nonblock;
         match target {
             crate::fs::vfs::SocketTarget::Loopback(handle) => {
                 let start = crate::net::socket::now();
-                while (crate::net::socket::now() - start).total_millis() < 2000 {
+                let timeout_ms = if nonblock { 0 } else { 2000 };
+                loop {
                     crate::net::socket::poll();
                     let mut sockets = crate::net::socket::LOOPBACK_SOCKETS.lock();
                     let socket = sockets.get_mut::<TcpSocket>(handle);
@@ -553,13 +558,16 @@ unsafe fn read_from_desc(desc: &mut FileDescriptor, buf: u64, count: u64) -> u64
                         return 0; // EOF
                     }
                     drop(sockets);
+                    if (crate::net::socket::now() - start).total_millis() >= timeout_ms {
+                        return 0; // -EAGAIN for nonblock, or timeout
+                    }
                     for _ in 0..5_000 { core::hint::spin_loop(); }
                 }
-                return 0;
             }
             crate::fs::vfs::SocketTarget::Ethernet(handle) => {
                 let start = crate::net::socket::now();
-                while (crate::net::socket::now() - start).total_millis() < 2000 {
+                let timeout_ms = if nonblock { 0 } else { 2000 };
+                loop {
                     crate::net::socket::poll();
                     let mut sockets = crate::net::socket::NET_SOCKETS.lock();
                     let socket = sockets.get_mut::<TcpSocket>(handle);
@@ -577,9 +585,11 @@ unsafe fn read_from_desc(desc: &mut FileDescriptor, buf: u64, count: u64) -> u64
                         return 0; // EOF
                     }
                     drop(sockets);
+                    if (crate::net::socket::now() - start).total_millis() >= timeout_ms {
+                        return 0; // -EAGAIN for nonblock, or timeout
+                    }
                     for _ in 0..5_000 { core::hint::spin_loop(); }
                 }
-                return 0;
             }
             _ => return !0,
         }
@@ -676,6 +686,13 @@ fn sys_close(fd: u64) -> u64 {
                             for _ in 0..1_000 { core::hint::spin_loop(); }
                         }
                         let mut sockets = crate::net::socket::LOOPBACK_SOCKETS.lock();
+                        let sock = sockets.get_mut::<TcpSocket>(handle);
+                        if sock.state() != State::Closed && sock.state() != State::TimeWait {
+                            sock.abort();
+                        }
+                        drop(sockets);
+                        for _ in 0..5 { crate::net::socket::poll(); }
+                        let mut sockets = crate::net::socket::LOOPBACK_SOCKETS.lock();
                         sockets.remove(handle);
                     }
                     crate::fs::vfs::SocketTarget::Ethernet(handle) => {
@@ -695,7 +712,7 @@ fn sys_close(fd: u64) -> u64 {
                         socket.close();
                         drop(sockets);
                         let close_start = crate::net::socket::now();
-                        while (crate::net::socket::now() - close_start).total_millis() < 300 {
+                        while (crate::net::socket::now() - close_start).total_millis() < 500 {
                             crate::net::socket::poll();
                             let sockets = crate::net::socket::NET_SOCKETS.lock();
                             let sock = sockets.get::<TcpSocket>(handle);
@@ -705,6 +722,13 @@ fn sys_close(fd: u64) -> u64 {
                             drop(sockets);
                             for _ in 0..2_000 { core::hint::spin_loop(); }
                         }
+                        let mut sockets = crate::net::socket::NET_SOCKETS.lock();
+                        let sock = sockets.get_mut::<TcpSocket>(handle);
+                        if sock.state() != State::Closed && sock.state() != State::TimeWait {
+                            sock.abort();
+                        }
+                        drop(sockets);
+                        for _ in 0..5 { crate::net::socket::poll(); }
                         let mut sockets = crate::net::socket::NET_SOCKETS.lock();
                         sockets.remove(handle);
                     }
@@ -1394,14 +1418,28 @@ fn sys_chdir(pathname: u64) -> u64 {
     (-2i64) as u64
 }
 
-fn sys_fcntl(fd: u64, cmd: u64, _arg: u64) -> u64 {
+fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
     if fd >= 64 { return !0; }
     match cmd {
         0 /* F_DUPFD */ | 1030 /* F_DUPFD_CLOEXEC */ => sys_dup(fd),
         1 /* F_GETFD */ => 0,
         2 /* F_SETFD */ => 0,
-        3 /* F_GETFL */ => 2, // O_RDWR
-        4 /* F_SETFL */ => 0,
+        3 /* F_GETFL */ => {
+            unsafe {
+                if let Some(ref desc) = FD_TABLE[fd as usize] {
+                    if desc.nonblock { 2 | 0x800 } else { 2 } // O_RDWR | O_NONBLOCK
+                } else { 2 }
+            }
+        },
+        4 /* F_SETFL */ => {
+            const O_NONBLOCK: u64 = 0x800;
+            unsafe {
+                if let Some(ref mut desc) = FD_TABLE[fd as usize] {
+                    desc.nonblock = (arg & O_NONBLOCK) != 0;
+                }
+            }
+            0
+        },
         _ => 0,
     }
 }
@@ -1706,14 +1744,8 @@ fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
         let mut start: u64 = 0;
         unsafe { core::arch::asm!("mrs {0}, cntvct_el0", out(reg) start); }
         let mut now = start;
-        let mut last_poll = start;
-        let poll_interval = freq / 100; // Poll network at most every 10ms
-
         while now.saturating_sub(start) < total_ticks {
-            if now.saturating_sub(last_poll) >= poll_interval {
-                crate::net::socket::poll();
-                last_poll = now;
-            }
+            crate::net::socket::poll();
             crate::sys::process::schedule();
             for _ in 0..1_000 {
                 core::hint::spin_loop();
@@ -1722,6 +1754,7 @@ fn sys_nanosleep(req_ptr: u64, _rem_ptr: u64) -> u64 {
                 core::arch::asm!("mrs {0}, cntvct_el0", out(reg) now);
             }
         }
+        crate::net::socket::poll();
     }
     0
 }
@@ -2001,8 +2034,10 @@ pub fn sys_exit(code: u64) -> u64 {
 pub fn sys_wait4(pid: i64, status_ptr: u64, _options: u64) -> u64 {
     crate::serial_println!("[Wait4] PID {} waiting for child {}", crate::sys::process::PROCESS_MANAGER.lock().current_pid, pid);
     loop {
+        let cpu = crate::hal::smp::current_cpu_id();
         let mut pm = crate::sys::process::PROCESS_MANAGER.lock();
-        let cur_pid = pm.current_pid;
+        let cur = pm.current_pids[cpu];
+        let cur_pid = if cur != 0 { cur } else { pm.current_pid };
 
         let mut found_child = false;
         let mut zombie_idx = None;

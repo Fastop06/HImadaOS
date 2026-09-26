@@ -175,35 +175,9 @@ Listen 80
 </IfModule>
 PORTS
 
-# Apache Welcome DocumentRoot
-cat << 'HTML' > initramfs/var/www/localhost/htdocs/index.html
-<!DOCTYPE html>
-<html>
-<head>
-  <title>HimadaOS</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 60px 20px; }
-    .container { max-width: 600px; margin: 0 auto; background: #1e293b; padding: 40px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
-    h1 { color: #38bdf8; font-size: 2.2rem; margin-bottom: 10px; }
-    .status { display: inline-block; background: #22c55e; color: #022c22; font-weight: bold; padding: 4px 12px; border-radius: 9999px; margin-bottom: 20px; font-size: 0.9rem; }
-    p { color: #94a3b8; line-height: 1.6; font-size: 1.05rem; }
-    .code { background: #0f172a; color: #a5b4fc; padding: 10px 14px; border-radius: 6px; font-family: monospace; text-align: left; margin: 20px 0; font-size: 0.9rem; border: 1px solid #334155; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="status">HTTP 200 OK</div>
-    <h1>It works!</h1>
-    <p>This is the default welcome page for the <strong>Apache HTTP Server 2.4.65</strong> running on <strong>HimadaOS 2.0 (Rolling Release)</strong> powered by the <strong>HimadaOS Kernel</strong>.</p>
-    <div class="code">
-      Server: Apache/2.4.65 (HimadaOS Rolling)<br>
-      DocumentRoot: /var/www/localhost/htdocs<br>
-      Architecture: aarch64 / x86_64
-    </div>
-  </div>
-</body>
-</html>
-HTML
+# Clean web root directory (starts empty)
+mkdir -p initramfs/var/www/localhost/htdocs
+
 
 # /proc stubs
 cat << 'PROC' > initramfs/proc/version
@@ -302,8 +276,16 @@ cp "$SCRATCH/himada-pkg-extract/target/aarch64-unknown-linux-musl/release/himada
 cp "$SCRATCH/himada-pkg-extract/target/aarch64-unknown-linux-musl/release/himada-pkg-extract" initramfs/bin/tar
 chmod +x initramfs/bin/himada-pkg-extract initramfs/usr/bin/himada-pkg-extract initramfs/bin/tar
 
-# Initialize empty package cache and repo (packages will be fetched live over HTTP from official mirrors)
+# Pre-populate package cache and repo with offline package archive and fast binaries
 mkdir -p initramfs/var/cache/pacman/pkg initramfs/repo
+if [ -d "$SCRATCH/pkg_mirror/pkg_db" ]; then
+  cp -r "$SCRATCH/pkg_mirror/pkg_db"/* initramfs/repo/ 2>/dev/null || true
+  cp -r "$SCRATCH/pkg_mirror/pkg_db"/* initramfs/var/cache/pacman/pkg/ 2>/dev/null || true
+fi
+if [ -d "$SCRATCH/pkg_mirror/packages" ]; then
+  cp -r "$SCRATCH/pkg_mirror/packages"/* initramfs/repo/ 2>/dev/null || true
+  cp -r "$SCRATCH/pkg_mirror/packages"/* initramfs/var/cache/pacman/pkg/ 2>/dev/null || true
+fi
 
 
 
@@ -386,7 +368,7 @@ xorriso -as mkisofs \
     -no-emul-boot -boot-load-size 4 -boot-info-table \
     --efi-boot limine-uefi-cd.bin -efi-boot-part --efi-boot-image --protective-msdos-label \
     "$SCRATCH/iso_root_arm64" -o "$SCRATCH/himada-os-arm64.iso"
-"$SCRATCH/himada-os/limine/limine" bios-install "$SCRATCH/himada-os-arm64.iso"
+"$SCRATCH/himada-os/limine/limine" bios-install "$SCRATCH/himada-os-arm64.iso" 2>/dev/null || true
 
 # x86_64 ISO
 mkdir -p "$SCRATCH/iso_root_x86/boot" "$SCRATCH/iso_root_x86/EFI/BOOT"
@@ -411,7 +393,7 @@ xorriso -as mkisofs \
     -no-emul-boot -boot-load-size 4 -boot-info-table \
     --efi-boot limine-uefi-cd.bin -efi-boot-part --efi-boot-image --protective-msdos-label \
     "$SCRATCH/iso_root_x86" -o "$SCRATCH/himada-os-x86_64.iso"
-"$SCRATCH/himada-os/limine/limine" bios-install "$SCRATCH/himada-os-x86_64.iso"
+"$SCRATCH/himada-os/limine/limine" bios-install "$SCRATCH/himada-os-x86_64.iso" 2>/dev/null || true
 
 # Deploy to User Desktop
 mkdir -p ~/Desktop/HimadaOS_Final

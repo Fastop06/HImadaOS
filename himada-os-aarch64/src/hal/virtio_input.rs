@@ -265,7 +265,9 @@ pub fn poll_keyboard() -> Option<u8> {
     }
 
     unsafe {
-        if !INPUT_READY { return None; }
+        if !INPUT_READY || INPUT.used.is_null() || INPUT.avail.is_null() || INPUT.bufs.is_null() || INPUT.desc.is_null() {
+            return None;
+        }
 
         let used = &*INPUT.used;
         let used_idx = ptr::read_volatile(&used.idx);
